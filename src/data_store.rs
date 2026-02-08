@@ -231,11 +231,11 @@ impl DataStore {
 
                     // normalize negative indices
                     start = if start >= 0 { start } else { len + start };
-                    stop = if stop < 0 {
-                        list.len() as i64 + stop
-                    } else {
-                        stop
-                    };
+                    stop = if stop < 0 { len + stop } else { stop };
+
+                    if start < 0 {
+                        start = 0;
+                    }
 
                     if stop >= len {
                         stop = len - 1;
