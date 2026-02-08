@@ -1,6 +1,6 @@
 use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
 
-use data_store::{CleanupType, DataStore, Governor, SetOption};
+use data_store::{CleanupType, DataStore, Governor, SetOption, StringKey};
 use resp_parser::RespParser;
 
 mod data_store;
@@ -54,22 +54,6 @@ impl DataType {
             DataType::SimpleError => '-',
             DataType::None => '\0',
         }
-    }
-}
-
-struct BulkString {
-    content: String,
-}
-
-impl BulkString {
-    fn new(content: &str) -> Self {
-        BulkString {
-            content: String::from(content),
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.content.len()
     }
 }
 
@@ -154,11 +138,14 @@ fn get_set_options(args: Vec<&str>) -> Vec<SetOption> {
 
 #[allow(dead_code)]
 enum Command {
+    // connection
     Ping,
-    Echo(BulkString),
-    Set(BulkString, BulkString, Vec<SetOption>),
-    Get(BulkString),
-    Unknown,
+    Echo(String),
+    // string
+    Set(StringKey, String, Vec<SetOption>),
+    Get(StringKey),
+    // list
+    Rpush(StringKey, Vec<String>),
 }
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
@@ -214,7 +201,7 @@ fn handle_input(data: &str) -> Option<Command> {
                 "PING" => Some(Command::Ping),
                 "ECHO" => {
                     if command_parts.len() >= 2 {
-                        Some(Command::Echo(BulkString::new(command_parts[1])))
+                        Some(Command::Echo(command_parts[1].to_string()))
                     } else {
                         None
                     }
@@ -227,8 +214,8 @@ fn handle_input(data: &str) -> Option<Command> {
                             options = get_set_options(command_parts[3..].to_vec());
                         }
                         Some(Command::Set(
-                            BulkString::new(command_parts[1]),
-                            BulkString::new(command_parts[2]),
+                            StringKey::from(command_parts[1]),
+                            String::from(command_parts[2]),
                             options,
                         ))
                     } else {
@@ -237,12 +224,20 @@ fn handle_input(data: &str) -> Option<Command> {
                 }
                 "GET" => {
                     if command_parts.len() >= 2 {
-                        Some(Command::Get(BulkString::new(command_parts[1])))
+                        Some(Command::Get(StringKey::from(command_parts[1])))
                     } else {
                         None
                     }
                 }
-                _ => Some(Command::Unknown),
+                "RPUSH" => {
+                    if command_parts.len() >= 3 {
+                        let list = command_parts[2..].iter().map(|&s| s.into()).collect();
+                        Some(Command::Rpush(StringKey::from(command_parts[1]), list))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
             }
         }
         _ => {
@@ -270,18 +265,18 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             resp_str.push(DataType::BulkString.to_char());
             resp_str.push_str(echo.len().to_string().as_str());
             resp_str.push_str("\r\n");
-            resp_str.push_str(&echo.content);
+            resp_str.push_str(&echo);
             resp_str.push_str("\r\n");
 
             write_to_stream(stream, resp_str.as_bytes());
         }
-        Command::Set(key, value, options) => match store.set(key.content, value.content, options) {
+        Command::Set(key, value, options) => match store.set(key, value, options) {
             Ok(v) => {
                 let mut resp_str = String::new();
                 resp_str.push(DataType::SimpleString.to_char());
 
                 if let Some(result) = v {
-                    resp_str.push_str(&result);
+                    resp_str.push_str(&result.to_string());
                 } else {
                     resp_str.push_str("OK");
                 }
@@ -294,16 +289,15 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error setting value");
             }
         },
-        Command::Get(value) => match store.get(&value.content) {
+        Command::Get(value) => match store.get(&value) {
             Ok(result) => {
                 let mut resp_str = String::new();
                 resp_str.push(DataType::BulkString.to_char());
 
                 if let Some(v) = result {
-                    println!("got value: {}", v);
-                    resp_str.push_str(v.len().to_string().as_str());
+                    resp_str.push_str(v.to_string().len().to_string().as_str());
                     resp_str.push_str("\r\n");
-                    resp_str.push_str(&v);
+                    resp_str.push_str(&v.to_string());
                 } else {
                     resp_str.push_str("-1");
                 }
@@ -316,9 +310,23 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error getting value");
             }
         },
-        _ => {
-            write_error_to_stream(stream, "unknown command");
-        }
+        Command::Rpush(key, list) => match store.rpush(key, list) {
+            Ok(result) => {
+                let mut resp_str = String::new();
+                resp_str.push(DataType::Integer.to_char());
+                if let Some(n) = result {
+                    resp_str.push_str(&n.to_string());
+                    resp_str.push_str("\r\n");
+                } else {
+                    write_error_to_stream(stream, "not a list");
+                }
+                write_to_stream(stream, resp_str.as_bytes());
+            }
+            Err(err) => {
+                eprintln!("error pushing to list: {}", err);
+                write_error_to_stream(stream, "error pushing to list");
+            }
+        },
     }
 }
 

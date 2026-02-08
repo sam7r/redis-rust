@@ -1,4 +1,4 @@
-use std::{collections, fmt, sync, time};
+use std::{cmp, collections, fmt, sync, time};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -40,36 +40,67 @@ impl fmt::Display for DataStoreError {
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockReadGuard<'_, collections::HashMap<String, String>>>>
+impl From<sync::PoisonError<sync::RwLockReadGuard<'_, collections::HashMap<String, Value>>>>
     for DataStoreError
 {
     fn from(
-        _: sync::PoisonError<sync::RwLockReadGuard<collections::HashMap<String, String>>>,
+        _: sync::PoisonError<sync::RwLockReadGuard<collections::HashMap<String, Value>>>,
     ) -> Self {
         DataStoreError::LockError
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, collections::HashMap<String, String>>>>
+impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, collections::HashMap<String, Value>>>>
     for DataStoreError
 {
     fn from(
-        _: sync::PoisonError<sync::RwLockWriteGuard<collections::HashMap<String, String>>>,
+        _: sync::PoisonError<sync::RwLockWriteGuard<collections::HashMap<String, Value>>>,
     ) -> Self {
         DataStoreError::LockError
+    }
+}
+
+pub type StringKey = String;
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub enum Value {
+    String(String),
+    List(Vec<String>),
+    Set(collections::HashSet<String>),
+    Hash(collections::HashMap<String, String>),
+}
+
+impl cmp::PartialEq<String> for Value {
+    fn eq(&self, other: &String) -> bool {
+        match self {
+            Value::String(s) => s == other,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::String(s) => write!(f, "{}", s),
+            Value::List(l) => write!(f, "{:?}", l),
+            Value::Set(s) => write!(f, "{:?}", s),
+            Value::Hash(h) => write!(f, "{:?}", h),
+        }
     }
 }
 
 pub struct DataStore {
-    data: sync::RwLock<collections::HashMap<String, String>>,
-    expirable: sync::RwLock<collections::HashMap<String, u128>>,
+    data: sync::RwLock<collections::HashMap<String, Value>>,
+    expires: sync::RwLock<collections::HashMap<String, u128>>,
 }
 
 impl DataStore {
     pub fn new() -> Self {
         DataStore {
             data: sync::RwLock::new(collections::HashMap::new()),
-            expirable: sync::RwLock::new(collections::HashMap::new()),
+            expires: sync::RwLock::new(collections::HashMap::new()),
         }
     }
 
@@ -78,8 +109,7 @@ impl DataStore {
         key: String,
         value: String,
         _options: Vec<SetOption>,
-    ) -> Result<Option<String>, DataStoreError> {
-        let mut data = self.data.write()?;
+    ) -> Result<Option<Value>, DataStoreError> {
         let mut ttl_options = Vec::new();
         let mut mod_options = Vec::new();
 
@@ -110,13 +140,13 @@ impl DataStore {
                         .unwrap()
                         .as_millis()
                         + (seconds as u128 * 1000);
-                    self.expirable
+                    self.expires
                         .write()
                         .unwrap()
                         .insert(key.clone(), expire_time);
                 }
                 SetOption::EXAT(seconds) => {
-                    self.expirable
+                    self.expires
                         .write()
                         .unwrap()
                         .insert(key.clone(), seconds as u128 * 1000);
@@ -127,14 +157,14 @@ impl DataStore {
                         .unwrap()
                         .as_millis()
                         + milliseconds;
-                    self.expirable
+                    self.expires
                         .write()
                         .unwrap()
                         .insert(key.clone(), expire_time);
                 }
                 SetOption::PXAT(milliseconds) => {
                     let expire_time = milliseconds;
-                    self.expirable
+                    self.expires
                         .write()
                         .unwrap()
                         .insert(key.clone(), expire_time);
@@ -145,6 +175,8 @@ impl DataStore {
                 _ => {}
             }
         }
+
+        let mut data = self.data.write()?;
 
         // TODO: handle digest comparisons for IFDEQ and IFDNE
         for option in mod_options {
@@ -180,12 +212,34 @@ impl DataStore {
             }
         }
 
-        data.insert(key, value);
+        data.insert(key, Value::String(value));
 
-        Ok(Some("OK".to_string()))
+        Ok(Some(Value::String("OK".to_string())))
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+    pub fn rpush(
+        &self,
+        key: StringKey,
+        value: Vec<String>,
+    ) -> Result<Option<usize>, DataStoreError> {
+        if let Some(existing_value) = self.data.read()?.get(&key).cloned() {
+            match existing_value {
+                Value::List(mut list) => {
+                    list.extend(value);
+                    let mut data = self.data.write()?;
+                    data.insert(key, Value::List(list.clone()));
+                    return Ok(Some(list.len()));
+                }
+                _ => return Ok(None), // Key exists but is not a list
+            };
+        }
+
+        let mut data = self.data.write()?;
+        data.insert(key, Value::List(value));
+        Ok(Some(1))
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<Value>, DataStoreError> {
         let data = self.data.read()?;
         let value = data.get(key).cloned();
 
@@ -201,7 +255,7 @@ impl DataStore {
 
         {
             // scope block to release read lock on expirable
-            let expirable = self.expirable.read().unwrap();
+            let expirable = self.expires.read().unwrap();
             expired_keys = expirable
                 .iter()
                 .filter(|(_, timestamp)| *timestamp <= &now)
@@ -215,11 +269,14 @@ impl DataStore {
     }
 
     fn del(&self, key: &str) -> Result<(), DataStoreError> {
-        let mut data = self.data.write()?;
-        data.remove(key);
-
-        let mut expirable = self.expirable.write().unwrap();
-        expirable.remove(key);
+        {
+            let mut data = self.data.write()?;
+            data.remove(key);
+        }
+        {
+            let mut expirable = self.expires.write().unwrap();
+            expirable.remove(key);
+        }
 
         Ok(())
     }
