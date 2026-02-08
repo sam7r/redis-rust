@@ -312,6 +312,26 @@ impl DataStore {
         }
     }
 
+    pub fn lpop(&self, key: StringKey) -> Result<Option<Value>, DataStoreError> {
+        let mut data = self.data.write()?;
+        if let Some(value) = data.get(&key).cloned() {
+            match value {
+                Value::List(mut list) => {
+                    if let Some(_) = list.clone().first() {
+                        let first = list.remove(0);
+                        data.insert(key, Value::List(list));
+                        Ok(Some(Value::String(first)))
+                    } else {
+                        Ok(None) // List is empty
+                    }
+                }
+                _ => Ok(None), // Key exists but is not a list
+            }
+        } else {
+            Ok(None) // Key does not exist
+        }
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Value>, DataStoreError> {
         let data = self.data.read()?;
         let value = data.get(key).cloned();

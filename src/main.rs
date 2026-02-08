@@ -149,6 +149,7 @@ enum Command {
     Lpush(StringKey, Vec<String>),
     Lrange(StringKey, i64, i64),
     Llen(StringKey),
+    Lpop(StringKey),
 }
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
@@ -264,6 +265,13 @@ fn handle_input(data: &str) -> Option<Command> {
                             start,
                             stop,
                         ))
+                    } else {
+                        None
+                    }
+                }
+                "LPOP" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Lpop(StringKey::from(command_parts[1])))
                     } else {
                         None
                     }
@@ -422,6 +430,25 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             Err(err) => {
                 eprintln!("error getting list length: {}", err);
                 write_error_to_stream(stream, "error getting list length");
+            }
+        },
+        Command::Lpop(key) => match store.lpop(key) {
+            Ok(result) => {
+                if let Some(item) = result {
+                    let mut resp_str = String::new();
+                    resp_str.push(DataType::BulkString.to_char());
+                    resp_str.push_str(item.to_string().len().to_string().as_str());
+                    resp_str.push_str("\r\n");
+                    resp_str.push_str(&item.to_string());
+                    resp_str.push_str("\r\n");
+                    write_to_stream(stream, resp_str.as_bytes());
+                } else {
+                    write_error_to_stream(stream, "not a list or empty list");
+                }
+            }
+            Err(err) => {
+                eprintln!("error popping from list: {}", err);
+                write_error_to_stream(stream, "error popping from list");
             }
         },
     }
