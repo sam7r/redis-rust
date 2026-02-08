@@ -1,20 +1,20 @@
-#![allow(unused_imports)]
-use std::{
-    collections::HashMap,
-    fmt::Display,
-    io::BufReader,
-    io::Read,
-    io::Write,
-    net::TcpListener,
-    rc::Rc,
-    str::Split,
-    sync::{Arc, Mutex},
-    thread,
-};
+use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
+
+use data_store::{CleanupType, DataStore, Governor, SetOption};
+use resp_parser::RespParser;
+
+mod data_store;
+mod resp_parser;
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
-    let store = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let store = Arc::new(DataStore::new());
+
+    let governor = Governor::new(
+        Arc::clone(&store),
+        CleanupType::Scheduled(Duration::from_millis(10)),
+    );
+    governor.start_cleanup();
 
     for stream in listener.incoming() {
         let kv_store = Arc::clone(&store);
@@ -24,13 +24,12 @@ fn main() {
     }
 }
 
-const CRLF: &str = "\r\n";
-
-// for full list see https://redis.io/docs/latest/develop/reference/protocol-spec/#resp-protocol-description
+// RESP2 data types
 enum DataType {
     SimpleString,
-    BulkString,
+    SimpleError,
     Integer,
+    BulkString,
     Array,
     None,
 }
@@ -40,26 +39,24 @@ impl DataType {
         match c {
             '*' => DataType::Array,
             '+' => DataType::SimpleString,
+            '-' => DataType::SimpleError,
             '$' => DataType::BulkString,
             ':' => DataType::Integer,
             _ => DataType::None,
         }
     }
-}
-
-impl Display for DataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn to_char(&self) -> char {
         match self {
-            DataType::SimpleString => write!(f, "SimpleString"),
-            DataType::BulkString => write!(f, "BulkString"),
-            DataType::Integer => write!(f, "Integer"),
-            DataType::Array => write!(f, "Array"),
-            DataType::None => write!(f, "None"),
+            DataType::SimpleString => '+',
+            DataType::BulkString => '$',
+            DataType::Integer => ':',
+            DataType::Array => '*',
+            DataType::SimpleError => '-',
+            DataType::None => '\0',
         }
     }
 }
 
-#[derive(Debug)]
 struct BulkString {
     content: String,
 }
@@ -71,90 +68,100 @@ impl BulkString {
         }
     }
 
-    fn empty() -> Self {
-        BulkString {
-            content: String::new(),
-        }
-    }
-
     fn len(&self) -> usize {
         self.content.len()
     }
 }
 
-#[derive(Debug)]
+fn get_set_options(args: Vec<&str>) -> Vec<SetOption> {
+    let mut options = Vec::new();
+    if args.is_empty() {
+        return options;
+    }
+
+    let mut iter = args.iter().peekable();
+
+    while let Some(opt) = iter.next() {
+        let upper_opt = opt.to_uppercase();
+
+        match upper_opt.as_str() {
+            "NX" => options.push(SetOption::NX),
+            "XX" => options.push(SetOption::XX),
+            "GET" => options.push(SetOption::GET),
+            "KEEPTTL" => options.push(SetOption::KEEPTTL),
+            "PX" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(milliseconds) = next_arg.parse::<u128>()
+                {
+                    options.push(SetOption::PX(milliseconds));
+                    iter.next();
+                }
+            }
+            "PXAT" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(milliseconds) = next_arg.parse::<u128>()
+                {
+                    options.push(SetOption::PXAT(milliseconds));
+                    iter.next();
+                }
+            }
+            "EX" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(seconds) = next_arg.parse::<u64>()
+                {
+                    options.push(SetOption::EX(seconds));
+                    iter.next();
+                }
+            }
+            "EXAT" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(seconds) = next_arg.parse::<u64>()
+                {
+                    options.push(SetOption::EXAT(seconds));
+                    iter.next();
+                }
+            }
+            "IFEQ" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFEQ(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            "IFNE" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFNE(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            "IFDEQ" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFDEQ(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            "IFDNE" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFDNE(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    options
+}
+
+#[allow(dead_code)]
 enum Command {
     Ping,
     Echo(BulkString),
-    Set(BulkString, BulkString),
+    Set(BulkString, BulkString, Vec<SetOption>),
     Get(BulkString),
     Unknown,
 }
 
-impl Display for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Command::Ping => write!(f, "PING"),
-            Command::Echo(echo) => write!(f, "ECHO {}", echo.content),
-            Command::Set(k, v) => write!(f, "SET {} {}", k.content, v.content),
-            Command::Get(k) => write!(f, "GET {}", k.content),
-            Command::Unknown => write!(f, "UNKNOWN"),
-        }
-    }
-}
-
-impl Command {
-    fn from_str(s: &str) -> Self {
-        let parts: Vec<&str> = s.split_whitespace().collect();
-        match parts[0].to_uppercase().as_str() {
-            "PING" => Command::Ping,
-            "ECHO" => Command::Echo(BulkString::empty()),
-            "SET" => Command::Set(BulkString::empty(), BulkString::empty()),
-            "GET" => Command::Get(BulkString::empty()),
-            _ => Command::Unknown,
-        }
-    }
-}
-
-fn handle_command(
-    stream: &mut std::net::TcpStream,
-    command: Command,
-    store: Arc<Mutex<HashMap<String, String>>>,
-) {
-    match command {
-        Command::Ping => {
-            let msg = "PONG";
-            let response = format!("+{}{CRLF}", msg);
-            let _ = stream.write(response.as_bytes()).unwrap();
-        }
-        Command::Echo(echo) => {
-            let response = format!("${}{CRLF}{}{CRLF}", echo.len(), echo.content);
-            let _ = stream.write(response.as_bytes()).unwrap();
-        }
-        Command::Set(key, value) => {
-            store.lock().unwrap().insert(key.content, value.content);
-            let response = format!("+{}{CRLF}", "OK");
-            let _ = stream.write(response.as_bytes()).unwrap();
-        }
-        Command::Get(value) => {
-            let kv = store.lock().unwrap();
-            let result = kv.get(&value.content);
-
-            if let Some(v) = result {
-                let response = format!("${}{CRLF}{}{CRLF}", v.len(), v);
-                let _ = stream.write(response.as_bytes()).unwrap();
-            } else {
-                let _ = stream.write(b"$-1\r\n").unwrap();
-            }
-        }
-        _ => {
-            let _ = stream.write(b"-ERR unknown command\r\n").unwrap();
-        }
-    }
-}
-
-fn handle_client(mut stream: std::net::TcpStream, store: Arc<Mutex<HashMap<String, String>>>) {
-    println!("accepted new connection");
+fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
     loop {
         let mut buffer = [0; 512];
         let bytes_read = stream.read(&mut buffer);
@@ -163,72 +170,170 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<Mutex<HashMap<Strin
             Ok(0) => break,
             Ok(n) => {
                 let input = String::from_utf8_lossy(&buffer[..n]);
-                dbg!(&input);
-
                 let kv_store = Arc::clone(&store);
-                handle_input(&mut stream, &input, kv_store);
+                if let Some(cmd) = handle_input(&input) {
+                    handle_command(&mut stream, kv_store, cmd);
+                } else {
+                    write_error_to_stream(&mut stream, "unable to handle request");
+                }
             }
             Err(err) => {
-                eprint!("error reading from stream: {}", err);
+                eprintln!("error reading from stream: {}", err);
                 break;
             }
         }
     }
 }
 
-fn handle_input(
-    stream: &mut std::net::TcpStream,
-    data: &str,
-    store: Arc<Mutex<HashMap<String, String>>>,
-) {
-    let mut input_char_itter = data.chars();
-    match DataType::from_char(input_char_itter.next().unwrap_or('\0')) {
-        // *<number-of-elements>\r\n<element-1>...<element-n>
+fn handle_input(data: &str) -> Option<Command> {
+    let mut parser = RespParser::new(data);
+
+    match DataType::from_char(parser.read_char().unwrap_or('\0')) {
         DataType::Array => {
-            let input = input_char_itter.as_str();
-            let mut args = input.split(CRLF);
-            let elements: u8 = str::parse(args.next().unwrap_or("0")).unwrap();
+            let elements: u8 = parser.read_line()?.parse().ok()?;
+            let mut command_parts = Vec::new();
 
             for _ in 0..elements {
-                let next = args.next().unwrap_or("");
-                let datatype = DataType::from_char(next.chars().next().unwrap_or('\0'));
+                let datatype_char = parser.read_char()?;
+                let datatype = DataType::from_char(datatype_char);
 
-                match datatype {
-                    // $<length>\r\n<content>\r\n$<length>\r\n<content>\r\n
-                    DataType::BulkString => {
-                        let bulk_str = args.next().unwrap().to_string();
-                        let mut cmd = Command::from_str(&bulk_str);
+                if let DataType::BulkString = datatype {
+                    let len: usize = parser.read_line()?.parse().ok()?;
+                    command_parts.push(parser.read_str(len)?);
+                } else {
+                    return None; // Unexpected data type
+                }
+            }
 
-                        match cmd {
-                            Command::Echo(ref mut v) => {
-                                args.next();
-                                *v = BulkString::new(args.next().unwrap());
-                            }
-                            Command::Set(ref mut k, ref mut v) => {
-                                args.next();
-                                *k = BulkString::new(args.next().unwrap());
-                                args.next();
-                                *v = BulkString::new(args.next().unwrap());
-                            }
-                            Command::Get(ref mut k) => {
-                                args.next();
-                                *k = BulkString::new(args.next().unwrap());
-                            }
-                            _ => (),
-                        }
+            if command_parts.is_empty() {
+                return None;
+            }
 
-                        dbg!(&cmd);
-                        handle_command(stream, cmd, store.clone());
-                    }
-                    _ => {
-                        break;
+            let command_name = command_parts[0].to_uppercase();
+            match command_name.as_str() {
+                "PING" => Some(Command::Ping),
+                "ECHO" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Echo(BulkString::new(command_parts[1])))
+                    } else {
+                        None
                     }
                 }
+                "SET" => {
+                    dbg!(&command_parts);
+                    if command_parts.len() >= 3 {
+                        let mut options = Vec::new();
+                        if command_parts.len() > 3 {
+                            options = get_set_options(command_parts[3..].to_vec());
+                        }
+                        Some(Command::Set(
+                            BulkString::new(command_parts[1]),
+                            BulkString::new(command_parts[2]),
+                            options,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                "GET" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Get(BulkString::new(command_parts[1])))
+                    } else {
+                        None
+                    }
+                }
+                _ => Some(Command::Unknown),
             }
         }
         _ => {
-            let input = input_char_itter.as_str();
-            println!("received unknown data type: {}", input.trim());
+            println!(
+                "received unsupported input data type: {}",
+                parser.data[parser.cursor..].trim()
+            );
+            None
         }
     }
+}
+
+fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, command: Command) {
+    match command {
+        Command::Ping => {
+            let mut resp_str = String::new();
+            resp_str.push(DataType::SimpleString.to_char());
+            resp_str.push_str("PONG");
+            resp_str.push_str("\r\n");
+
+            write_to_stream(stream, resp_str.as_bytes());
+        }
+        Command::Echo(echo) => {
+            let mut resp_str = String::new();
+            resp_str.push(DataType::BulkString.to_char());
+            resp_str.push_str(echo.len().to_string().as_str());
+            resp_str.push_str("\r\n");
+            resp_str.push_str(&echo.content);
+            resp_str.push_str("\r\n");
+
+            write_to_stream(stream, resp_str.as_bytes());
+        }
+        Command::Set(key, value, options) => match store.set(key.content, value.content, options) {
+            Ok(v) => {
+                let mut resp_str = String::new();
+                resp_str.push(DataType::SimpleString.to_char());
+
+                if let Some(result) = v {
+                    resp_str.push_str(&result);
+                } else {
+                    resp_str.push_str("OK");
+                }
+
+                resp_str.push_str("\r\n");
+                write_to_stream(stream, resp_str.as_bytes());
+            }
+            Err(err) => {
+                eprintln!("error setting value: {}", err);
+                write_error_to_stream(stream, "error setting value");
+            }
+        },
+        Command::Get(value) => match store.get(&value.content) {
+            Ok(result) => {
+                let mut resp_str = String::new();
+                resp_str.push(DataType::BulkString.to_char());
+
+                if let Some(v) = result {
+                    println!("got value: {}", v);
+                    resp_str.push_str(v.len().to_string().as_str());
+                    resp_str.push_str("\r\n");
+                    resp_str.push_str(&v);
+                } else {
+                    resp_str.push_str("-1");
+                }
+
+                resp_str.push_str("\r\n");
+                write_to_stream(stream, resp_str.as_bytes());
+            }
+            Err(err) => {
+                eprintln!("error getting value: {}", err);
+                write_error_to_stream(stream, "error getting value");
+            }
+        },
+        _ => {
+            write_error_to_stream(stream, "unknown command");
+        }
+    }
+}
+
+fn write_to_stream(stream: &mut std::net::TcpStream, data: &[u8]) {
+    if let Ok(n) = stream.write(data)
+        && n != data.len()
+    {
+        eprintln!("error writing to stream: only wrote {} bytes", n);
+    }
+}
+
+fn write_error_to_stream(stream: &mut std::net::TcpStream, message: &str) {
+    let mut resp_str = String::new();
+    resp_str.push(DataType::SimpleError.to_char());
+    resp_str.push_str(message);
+    resp_str.push_str("\r\n");
+    write_to_stream(stream, resp_str.as_bytes());
 }
