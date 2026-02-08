@@ -300,6 +300,18 @@ impl DataStore {
         Ok(Some(len))
     }
 
+    pub fn llen(&self, key: StringKey) -> Result<Option<usize>, DataStoreError> {
+        let data = self.data.read()?;
+        if let Some(value) = data.get(&key) {
+            match value {
+                Value::List(list) => Ok(Some(list.len())),
+                _ => Ok(None), // Key exists but is not a list
+            }
+        } else {
+            Ok(Some(0)) // Key does not exist, treat as empty list
+        }
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Value>, DataStoreError> {
         let data = self.data.read()?;
         let value = data.get(key).cloned();

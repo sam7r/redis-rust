@@ -148,6 +148,7 @@ enum Command {
     Rpush(StringKey, Vec<String>),
     Lpush(StringKey, Vec<String>),
     Lrange(StringKey, i64, i64),
+    Llen(StringKey),
 }
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
@@ -243,6 +244,13 @@ fn handle_input(data: &str) -> Option<Command> {
                     if command_parts.len() >= 3 {
                         let list = command_parts[2..].iter().map(|&s| s.into()).collect();
                         Some(Command::Lpush(StringKey::from(command_parts[1]), list))
+                    } else {
+                        None
+                    }
+                }
+                "LLEN" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Llen(StringKey::from(command_parts[1])))
                     } else {
                         None
                     }
@@ -397,6 +405,23 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             Err(err) => {
                 eprintln!("error getting list range: {}", err);
                 write_error_to_stream(stream, "error getting list range");
+            }
+        },
+        Command::Llen(key) => match store.llen(key) {
+            Ok(result) => {
+                if let Some(n) = result {
+                    let mut resp_str = String::new();
+                    resp_str.push(DataType::Integer.to_char());
+                    resp_str.push_str(&n.to_string());
+                    resp_str.push_str("\r\n");
+                    write_to_stream(stream, resp_str.as_bytes());
+                } else {
+                    write_error_to_stream(stream, "not a list");
+                }
+            }
+            Err(err) => {
+                eprintln!("error getting list length: {}", err);
+                write_error_to_stream(stream, "error getting list length");
             }
         },
     }
