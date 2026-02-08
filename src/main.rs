@@ -146,6 +146,7 @@ enum Command {
     Get(StringKey),
     // list
     Rpush(StringKey, Vec<String>),
+    Lrange(StringKey, i64, i64),
 }
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
@@ -237,7 +238,26 @@ fn handle_input(data: &str) -> Option<Command> {
                         None
                     }
                 }
-                _ => None,
+                "LRANGE" => {
+                    if command_parts.len() >= 4 {
+                        let start: i64 = command_parts[2].parse().ok()?;
+                        let stop: i64 = command_parts[3].parse().ok()?;
+                        Some(Command::Lrange(
+                            StringKey::from(command_parts[1]),
+                            start,
+                            stop,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    println!(
+                        "received unsupported command: {}",
+                        parser.data[parser.cursor..].trim()
+                    );
+                    None
+                }
             }
         }
         _ => {
@@ -325,6 +345,32 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             Err(err) => {
                 eprintln!("error pushing to list: {}", err);
                 write_error_to_stream(stream, "error pushing to list");
+            }
+        },
+        Command::Lrange(key, start, stop) => match store.lrange(key, (start, stop)) {
+            Ok(result) => {
+                if let Some(list) = result {
+                    let mut resp_str = String::new();
+                    resp_str.push(DataType::Array.to_char());
+                    resp_str.push_str(list.len().to_string().as_str());
+                    resp_str.push_str("\r\n");
+
+                    list.iter().for_each(|item| {
+                        resp_str.push(DataType::BulkString.to_char());
+                        resp_str.push_str(item.len().to_string().as_str());
+                        resp_str.push_str("\r\n");
+                        resp_str.push_str(item);
+                        resp_str.push_str("\r\n");
+                    });
+
+                    write_to_stream(stream, resp_str.as_bytes());
+                } else {
+                    write_error_to_stream(stream, "not a list");
+                }
+            }
+            Err(err) => {
+                eprintln!("error getting list range: {}", err);
+                write_error_to_stream(stream, "error getting list range");
             }
         },
     }

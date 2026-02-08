@@ -217,6 +217,43 @@ impl DataStore {
         Ok(Some(Value::String("OK".to_string())))
     }
 
+    pub fn lrange(
+        &self,
+        key: StringKey,
+        range: (i64, i64),
+    ) -> Result<Option<Vec<String>>, DataStoreError> {
+        let data = self.data.read()?;
+        if let Some(value) = data.get(&key) {
+            match value {
+                Value::List(list) => {
+                    let (mut start, mut stop) = range;
+                    let len = list.len() as i64;
+
+                    // normalize negative indices
+                    start = if start >= 0 { start } else { len + start };
+                    stop = if stop < 0 {
+                        list.len() as i64 + stop
+                    } else {
+                        stop
+                    };
+
+                    if stop >= len {
+                        stop = len - 1;
+                    }
+
+                    if start >= len || start > stop {
+                        return Ok(Some(Vec::new()));
+                    }
+
+                    Ok(Some(list[start as usize..=stop as usize].to_vec()))
+                }
+                _ => Ok(None),
+            }
+        } else {
+            Ok(Some(vec![]))
+        }
+    }
+
     pub fn rpush(
         &self,
         key: StringKey,
