@@ -277,6 +277,29 @@ impl DataStore {
         Ok(Some(len))
     }
 
+    pub fn lpush(
+        &self,
+        key: StringKey,
+        value: Vec<String>,
+    ) -> Result<Option<usize>, DataStoreError> {
+        let mut value_list = value;
+        value_list.reverse();
+        let mut data = self.data.write()?;
+
+        if let Some(existing_value) = data.get(&key).cloned() {
+            match existing_value {
+                Value::List(list) => {
+                    value_list.extend(list);
+                }
+                _ => return Ok(None), // Key exists but is not a list
+            };
+        }
+
+        let len = value_list.len();
+        data.insert(key, Value::List(value_list));
+        Ok(Some(len))
+    }
+
     pub fn get(&self, key: &str) -> Result<Option<Value>, DataStoreError> {
         let data = self.data.read()?;
         let value = data.get(key).cloned();

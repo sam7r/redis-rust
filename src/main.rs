@@ -146,6 +146,7 @@ enum Command {
     Get(StringKey),
     // list
     Rpush(StringKey, Vec<String>),
+    Lpush(StringKey, Vec<String>),
     Lrange(StringKey, i64, i64),
 }
 
@@ -234,6 +235,14 @@ fn handle_input(data: &str) -> Option<Command> {
                     if command_parts.len() >= 3 {
                         let list = command_parts[2..].iter().map(|&s| s.into()).collect();
                         Some(Command::Rpush(StringKey::from(command_parts[1]), list))
+                    } else {
+                        None
+                    }
+                }
+                "LPUSH" => {
+                    if command_parts.len() >= 3 {
+                        let list = command_parts[2..].iter().map(|&s| s.into()).collect();
+                        Some(Command::Lpush(StringKey::from(command_parts[1]), list))
                     } else {
                         None
                     }
@@ -331,6 +340,23 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             }
         },
         Command::Rpush(key, list) => match store.rpush(key, list) {
+            Ok(result) => {
+                if let Some(n) = result {
+                    let mut resp_str = String::new();
+                    resp_str.push(DataType::Integer.to_char());
+                    resp_str.push_str(&n.to_string());
+                    resp_str.push_str("\r\n");
+                    write_to_stream(stream, resp_str.as_bytes());
+                } else {
+                    write_error_to_stream(stream, "not a list");
+                }
+            }
+            Err(err) => {
+                eprintln!("error pushing to list: {}", err);
+                write_error_to_stream(stream, "error pushing to list");
+            }
+        },
+        Command::Lpush(key, list) => match store.lpush(key, list) {
             Ok(result) => {
                 if let Some(n) = result {
                     let mut resp_str = String::new();
