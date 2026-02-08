@@ -149,7 +149,7 @@ enum Command {
     Lpush(StringKey, Vec<String>),
     Lrange(StringKey, i64, i64),
     Llen(StringKey),
-    Lpop(StringKey),
+    Lpop(StringKey, u8),
 }
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
@@ -271,7 +271,11 @@ fn handle_input(data: &str) -> Option<Command> {
                 }
                 "LPOP" => {
                     if command_parts.len() >= 2 {
-                        Some(Command::Lpop(StringKey::from(command_parts[1])))
+                        let mut count = 1;
+                        if let Some(pop_count) = command_parts.get(2) {
+                            count = pop_count.parse().ok()?;
+                        }
+                        Some(Command::Lpop(StringKey::from(command_parts[1]), count))
                     } else {
                         None
                     }
@@ -432,15 +436,26 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error getting list length");
             }
         },
-        Command::Lpop(key) => match store.lpop(key) {
+        Command::Lpop(key, count) => match store.lpop(key, count) {
             Ok(result) => {
-                if let Some(item) = result {
+                if let Some(items) = result {
+                    let list_len = items.len();
                     let mut resp_str = String::new();
-                    resp_str.push(DataType::BulkString.to_char());
-                    resp_str.push_str(item.to_string().len().to_string().as_str());
-                    resp_str.push_str("\r\n");
-                    resp_str.push_str(&item.to_string());
-                    resp_str.push_str("\r\n");
+
+                    if list_len > 1 {
+                        resp_str.push(DataType::Array.to_char());
+                        resp_str.push_str(list_len.to_string().as_str());
+                        resp_str.push_str("\r\n");
+                    }
+
+                    for item in items {
+                        resp_str.push(DataType::BulkString.to_char());
+                        resp_str.push_str(item.len().to_string().as_str());
+                        resp_str.push_str("\r\n");
+                        resp_str.push_str(&item.to_string());
+                        resp_str.push_str("\r\n");
+                    }
+
                     write_to_stream(stream, resp_str.as_bytes());
                 } else {
                     write_error_to_stream(stream, "not a list or empty list");

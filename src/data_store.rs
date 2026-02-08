@@ -312,18 +312,20 @@ impl DataStore {
         }
     }
 
-    pub fn lpop(&self, key: StringKey) -> Result<Option<Value>, DataStoreError> {
+    pub fn lpop(&self, key: StringKey, count: u8) -> Result<Option<Vec<String>>, DataStoreError> {
         let mut data = self.data.write()?;
         if let Some(value) = data.get(&key).cloned() {
             match value {
                 Value::List(mut list) => {
-                    if let Some(_) = list.clone().first() {
-                        let first = list.remove(0);
-                        data.insert(key, Value::List(list));
-                        Ok(Some(Value::String(first)))
-                    } else {
-                        Ok(None) // List is empty
+                    let mut split_from = count;
+                    if count as usize > list.len() {
+                        split_from = list.len() as u8;
                     }
+
+                    let new_list = list.split_off(split_from as usize);
+                    data.insert(key, Value::List(new_list));
+
+                    Ok(Some(list))
                 }
                 _ => Ok(None), // Key exists but is not a list
             }
