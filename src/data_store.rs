@@ -222,21 +222,22 @@ impl DataStore {
         key: StringKey,
         value: Vec<String>,
     ) -> Result<Option<usize>, DataStoreError> {
-        if let Some(existing_value) = self.data.read()?.get(&key).cloned() {
+        let mut value_list = value;
+        let mut data = self.data.write()?;
+
+        if let Some(existing_value) = data.get(&key).cloned() {
             match existing_value {
                 Value::List(mut list) => {
-                    list.extend(value);
-                    let mut data = self.data.write()?;
-                    data.insert(key, Value::List(list.clone()));
-                    return Ok(Some(list.len()));
+                    list.extend(value_list);
+                    value_list = list;
                 }
                 _ => return Ok(None), // Key exists but is not a list
             };
         }
 
-        let mut data = self.data.write()?;
-        data.insert(key, Value::List(value));
-        Ok(Some(1))
+        let len = value_list.len();
+        data.insert(key, Value::List(value_list));
+        Ok(Some(len))
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Value>, DataStoreError> {

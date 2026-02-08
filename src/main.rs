@@ -312,15 +312,15 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
         },
         Command::Rpush(key, list) => match store.rpush(key, list) {
             Ok(result) => {
-                let mut resp_str = String::new();
-                resp_str.push(DataType::Integer.to_char());
                 if let Some(n) = result {
+                    let mut resp_str = String::new();
+                    resp_str.push(DataType::Integer.to_char());
                     resp_str.push_str(&n.to_string());
                     resp_str.push_str("\r\n");
+                    write_to_stream(stream, resp_str.as_bytes());
                 } else {
                     write_error_to_stream(stream, "not a list");
                 }
-                write_to_stream(stream, resp_str.as_bytes());
             }
             Err(err) => {
                 eprintln!("error pushing to list: {}", err);
