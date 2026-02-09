@@ -1,6 +1,11 @@
 use std::{
-    cmp, collections, fmt,
-    sync::{self},
+    cmp,
+    collections::HashMap,
+    fmt,
+    sync::{
+        self,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[derive(Debug)]
@@ -49,22 +54,18 @@ impl fmt::Display for DataStoreError {
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockReadGuard<'_, collections::HashMap<StringKey, Value>>>>
+impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<StringKey, Value>>>>
     for DataStoreError
 {
-    fn from(
-        _: sync::PoisonError<sync::RwLockReadGuard<collections::HashMap<String, Value>>>,
-    ) -> Self {
+    fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<String, Value>>>) -> Self {
         DataStoreError::LockError
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, collections::HashMap<String, Value>>>>
+impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<String, Value>>>>
     for DataStoreError
 {
-    fn from(
-        _: sync::PoisonError<sync::RwLockWriteGuard<collections::HashMap<String, Value>>>,
-    ) -> Self {
+    fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<String, Value>>>) -> Self {
         DataStoreError::LockError
     }
 }
@@ -99,28 +100,38 @@ impl fmt::Display for Value {
 #[derive(Clone)]
 pub enum Event {
     Pushed(StringKey),
+    Close(usize),
 }
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Event::Pushed(key) => write!(f, "pushed to key: {}", key),
+            Event::Close(_) => write!(f, "close event"),
         }
     }
 }
 
+#[allow(dead_code)]
+fn get_id() -> usize {
+    static COUNTER: AtomicUsize = AtomicUsize::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+type Subscribers = Vec<(usize, sync::mpsc::Sender<Event>)>;
+
 pub struct DataStore {
-    data: sync::RwLock<collections::HashMap<StringKey, Value>>,
-    expires: sync::RwLock<collections::HashMap<StringKey, u128>>,
-    channels: sync::RwLock<collections::HashMap<StringKey, Vec<sync::mpsc::Sender<Event>>>>,
+    data: sync::RwLock<HashMap<StringKey, Value>>,
+    expires: sync::RwLock<HashMap<StringKey, u128>>,
+    channels: sync::RwLock<HashMap<StringKey, Subscribers>>,
 }
 
 impl DataStore {
     pub fn new() -> Self {
         DataStore {
-            data: sync::RwLock::new(collections::HashMap::new()),
-            expires: sync::RwLock::new(collections::HashMap::new()),
-            channels: sync::RwLock::new(collections::HashMap::new()),
+            data: sync::RwLock::new(HashMap::new()),
+            expires: sync::RwLock::new(HashMap::new()),
+            channels: sync::RwLock::new(HashMap::new()),
         }
     }
 
@@ -365,12 +376,8 @@ impl DataStore {
     pub fn blpop(
         &self,
         key: StringKey,
-        wait_time_seconds: u64,
+        wait_time_seconds: f32,
     ) -> Result<Option<Vec<String>>, DataStoreError> {
-        if wait_time_seconds != 0 {
-            // TODO: handle timeout
-        }
-
         // early return if value is already available
         if let Ok(v) = self.lpop(key.clone(), 1)
             && let Some(value) = v
@@ -380,12 +387,26 @@ impl DataStore {
         }
 
         let (sender, receiver) = sync::mpsc::channel();
-        match self.add_channel_subscriber(key, sender) {
-            Ok(_) => {
+
+        match self.add_channel_subscriber(key, sender.clone()) {
+            Ok(id) => {
+                if wait_time_seconds > 0f32 {
+                    let closer = sender.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
+                        let _ = closer.send(Event::Close(id));
+                    });
+                }
+
                 if let Ok(event) = receiver.recv() {
                     match event {
                         Event::Pushed(key) => {
                             return self.lpop(key, 1);
+                        }
+                        Event::Close(n) => {
+                            if n == id {
+                                return Ok(None);
+                            }
                         }
                     }
                 }
@@ -414,14 +435,15 @@ impl DataStore {
         &self,
         key: StringKey,
         subscriber: sync::mpsc::Sender<Event>,
-    ) -> Result<(), DataStoreError> {
+    ) -> Result<usize, DataStoreError> {
         match self.channels.write() {
             Ok(mut channels) => {
+                let id = get_id();
                 channels
                     .entry(key)
                     .or_insert_with(Vec::new)
-                    .push(subscriber);
-                Ok(())
+                    .push((id, subscriber));
+                Ok(id)
             }
             Err(_) => Err(DataStoreError::LockError),
         }
@@ -435,7 +457,7 @@ impl DataStore {
         match self.channels.read() {
             Ok(channels) => {
                 if let Some(subscribers) = channels.get(&key) {
-                    for subscriber in subscribers {
+                    for (_, subscriber) in subscribers {
                         let _ = subscriber.send(event.clone());
                     }
                 }

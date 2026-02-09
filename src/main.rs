@@ -20,7 +20,7 @@ enum Command {
     Lrange(StringKey, i64, i64),
     Llen(StringKey),
     Lpop(StringKey, u8),
-    Blpop(StringKey, u64),
+    Blpop(StringKey, f32),
 }
 
 fn main() {
@@ -364,8 +364,8 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             }
         },
         Command::Blpop(key, timeout) => match store.blpop(key.clone(), timeout) {
-            Ok(result) => {
-                if let Some(items) = result {
+            Ok(result) => match result {
+                Some(items) => {
                     let list_len = items.len();
                     let mut resp_str = String::new();
 
@@ -388,13 +388,16 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                         resp_str.push_str("\r\n");
                     }
 
-                    dbg!(&resp_str);
-
                     write_to_stream(stream, resp_str.as_bytes());
-                } else {
-                    write_error_to_stream(stream, "not a list or empty list");
                 }
-            }
+                None => {
+                    let mut resp_str = String::new();
+                    resp_str.push(DataType::Array.to_char());
+                    resp_str.push_str("-1");
+                    resp_str.push_str("\r\n");
+                    write_to_stream(stream, resp_str.as_bytes());
+                }
+            },
             Err(err) => {
                 eprintln!("error popping from list: {}", err);
                 write_error_to_stream(stream, "error popping from list");
