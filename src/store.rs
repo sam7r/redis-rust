@@ -1,11 +1,15 @@
-use std::{cmp, collections, fmt, sync, time};
+use std::{
+    cmp, collections, fmt,
+    sync::{self},
+};
 
 #[derive(Debug)]
-#[allow(dead_code)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum SetOption {
-    NX, // Only set if the key does not exist
-    XX, // Only set if the key already exists
+    // Only set if the key does not exist
+    NX,
+    // Only set if the key already exists
+    XX,
     // Set the key’s value and expiration only if its current value is equal to ifeq-value.
     // If the key doesn’t exist, it won’t be created.
     IFEQ(String),
@@ -21,11 +25,16 @@ pub enum SetOption {
     // Return the old string stored at key, or nil if key did not exist.
     // An error is returned and SET aborted if the value stored at key is not a string.
     GET,
-    EX(u64),    // Set the specified expire time, in seconds.
-    PX(u128),   // Set the specified expire time, in milliseconds.
-    EXAT(u64),  // Set the specified expire time, in seconds since the Unix epoch.
-    PXAT(u128), // Set the specified expire time, in milliseconds since the Unix epoch
-    KEEPTTL,    // Retain the time to live associated with the key.
+    // Set the specified expire time, in seconds.
+    EX(u64),
+    // Set the specified expire time, in milliseconds.
+    PX(u128),
+    // Set the specified expire time, in seconds since the Unix epoch.
+    EXAT(u64),
+    // Set the specified expire time, in milliseconds since the Unix epoch
+    PXAT(u128),
+    // Retain the time to live associated with the key.
+    KEEPTTL,
 }
 
 pub enum DataStoreError {
@@ -40,7 +49,7 @@ impl fmt::Display for DataStoreError {
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockReadGuard<'_, collections::HashMap<String, Value>>>>
+impl From<sync::PoisonError<sync::RwLockReadGuard<'_, collections::HashMap<StringKey, Value>>>>
     for DataStoreError
 {
     fn from(
@@ -63,12 +72,9 @@ impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, collections::HashMap<Stri
 pub type StringKey = String;
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub enum Value {
     String(String),
     List(Vec<String>),
-    Set(collections::HashSet<String>),
-    Hash(collections::HashMap<String, String>),
 }
 
 impl cmp::PartialEq<String> for Value {
@@ -85,15 +91,28 @@ impl fmt::Display for Value {
         match self {
             Value::String(s) => write!(f, "{}", s),
             Value::List(l) => write!(f, "{:?}", l),
-            Value::Set(s) => write!(f, "{:?}", s),
-            Value::Hash(h) => write!(f, "{:?}", h),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub enum Event {
+    Pushed(StringKey),
+}
+
+impl fmt::Display for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Event::Pushed(key) => write!(f, "pushed to key: {}", key),
         }
     }
 }
 
 pub struct DataStore {
-    data: sync::RwLock<collections::HashMap<String, Value>>,
-    expires: sync::RwLock<collections::HashMap<String, u128>>,
+    data: sync::RwLock<collections::HashMap<StringKey, Value>>,
+    expires: sync::RwLock<collections::HashMap<StringKey, u128>>,
+    channels: sync::RwLock<collections::HashMap<StringKey, Vec<sync::mpsc::Sender<Event>>>>,
 }
 
 impl DataStore {
@@ -101,6 +120,7 @@ impl DataStore {
         DataStore {
             data: sync::RwLock::new(collections::HashMap::new()),
             expires: sync::RwLock::new(collections::HashMap::new()),
+            channels: sync::RwLock::new(collections::HashMap::new()),
         }
     }
 
@@ -178,7 +198,6 @@ impl DataStore {
 
         let mut data = self.data.write()?;
 
-        // TODO: handle digest comparisons for IFDEQ and IFDNE
         for option in mod_options {
             match option {
                 SetOption::NX => {
@@ -207,6 +226,8 @@ impl DataStore {
                         return Ok(None);
                     }
                 }
+                SetOption::IFDEQ(_ifeq_digest) => {}
+                SetOption::IFDNE(_ifne_digest) => {}
                 SetOption::GET => {}
                 _ => {}
             }
@@ -236,7 +257,6 @@ impl DataStore {
                     if start < 0 {
                         start = 0;
                     }
-
                     if stop >= len {
                         stop = len - 1;
                     }
@@ -273,7 +293,10 @@ impl DataStore {
         }
 
         let len = value_list.len();
-        data.insert(key, Value::List(value_list));
+        data.insert(key.clone(), Value::List(value_list));
+
+        self.publish_to_subscribers(key.clone(), Event::Pushed(key))?;
+
         Ok(Some(len))
     }
 
@@ -296,7 +319,10 @@ impl DataStore {
         }
 
         let len = value_list.len();
-        data.insert(key, Value::List(value_list));
+        data.insert(key.clone(), Value::List(value_list));
+
+        self.publish_to_subscribers(key.clone(), Event::Pushed(key))?;
+
         Ok(Some(len))
     }
 
@@ -323,7 +349,9 @@ impl DataStore {
                     }
 
                     let new_list = list.split_off(split_from as usize);
-                    data.insert(key, Value::List(new_list));
+                    data.insert(key.clone(), Value::List(new_list));
+
+                    self.publish_to_subscribers(key.clone(), Event::Pushed(key))?;
 
                     Ok(Some(list))
                 }
@@ -334,11 +362,87 @@ impl DataStore {
         }
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<Value>, DataStoreError> {
+    pub fn blpop(
+        &self,
+        key: StringKey,
+        wait_time_seconds: u64,
+    ) -> Result<Option<Vec<String>>, DataStoreError> {
+        if wait_time_seconds != 0 {
+            // TODO: handle timeout
+        }
+
+        // early return if value is already available
+        if let Ok(v) = self.lpop(key.clone(), 1)
+            && let Some(value) = v
+            && !value.is_empty()
+        {
+            return Ok(Some(value));
+        }
+
+        let (sender, receiver) = sync::mpsc::channel();
+        match self.add_channel_subscriber(key, sender) {
+            Ok(_) => {
+                if let Ok(event) = receiver.recv() {
+                    match event {
+                        Event::Pushed(key) => {
+                            return self.lpop(key, 1);
+                        }
+                    }
+                }
+            }
+            Err(_) => return Err(DataStoreError::LockError),
+        }
+
+        Ok(None)
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<String>, DataStoreError> {
         let data = self.data.read()?;
         let value = data.get(key).cloned();
 
-        Ok(value)
+        if let Some(v) = value {
+            match v {
+                Value::String(result) => return Ok(Some(result)),
+                _ => return Ok(None), // Key exists but is not a string
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn add_channel_subscriber(
+        &self,
+        key: StringKey,
+        subscriber: sync::mpsc::Sender<Event>,
+    ) -> Result<(), DataStoreError> {
+        match self.channels.write() {
+            Ok(mut channels) => {
+                channels
+                    .entry(key)
+                    .or_insert_with(Vec::new)
+                    .push(subscriber);
+                Ok(())
+            }
+            Err(_) => Err(DataStoreError::LockError),
+        }
+    }
+
+    pub fn publish_to_subscribers(
+        &self,
+        key: StringKey,
+        event: Event,
+    ) -> Result<(), DataStoreError> {
+        match self.channels.read() {
+            Ok(channels) => {
+                if let Some(subscribers) = channels.get(&key) {
+                    for subscriber in subscribers {
+                        let _ = subscriber.send(event.clone());
+                    }
+                }
+                Ok(())
+            }
+            Err(_) => Err(DataStoreError::LockError),
+        }
     }
 
     pub fn cleanup(&self) {
@@ -374,36 +478,5 @@ impl DataStore {
         }
 
         Ok(())
-    }
-}
-
-pub enum CleanupType {
-    Scheduled(time::Duration), // Cleanup every n milliseconds
-}
-
-pub struct Governor {
-    datastore: sync::Arc<DataStore>,
-    cleanup_type: CleanupType,
-}
-
-impl Governor {
-    pub fn new(datastore: sync::Arc<DataStore>, cleanup_type: CleanupType) -> Self {
-        Governor {
-            datastore,
-            cleanup_type,
-        }
-    }
-
-    pub fn start_cleanup(self) {
-        match self.cleanup_type {
-            CleanupType::Scheduled(interval) => {
-                std::thread::spawn(move || {
-                    loop {
-                        std::thread::sleep(interval);
-                        self.datastore.cleanup();
-                    }
-                });
-            }
-        }
     }
 }

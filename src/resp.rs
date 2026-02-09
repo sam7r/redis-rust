@@ -3,6 +3,39 @@ pub struct RespParser<'a> {
     pub cursor: usize,
 }
 
+// RESP2 data types
+pub enum DataType {
+    SimpleString,
+    SimpleError,
+    Integer,
+    BulkString,
+    Array,
+    None,
+}
+
+impl DataType {
+    pub fn from_char(c: char) -> Self {
+        match c {
+            '*' => DataType::Array,
+            '+' => DataType::SimpleString,
+            '-' => DataType::SimpleError,
+            '$' => DataType::BulkString,
+            ':' => DataType::Integer,
+            _ => DataType::None,
+        }
+    }
+    pub fn to_char(&self) -> char {
+        match self {
+            DataType::SimpleString => '+',
+            DataType::BulkString => '$',
+            DataType::Integer => ':',
+            DataType::Array => '*',
+            DataType::SimpleError => '-',
+            DataType::None => '\0',
+        }
+    }
+}
+
 impl<'a> RespParser<'a> {
     pub fn new(data: &'a str) -> Self {
         RespParser { data, cursor: 0 }

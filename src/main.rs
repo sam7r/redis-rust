@@ -1,142 +1,12 @@
+use governor::{CleanupType, Governor};
+use resp::{DataType, RespParser};
 use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
+use store::{DataStore, SetOption, StringKey};
 
-use data_store::{CleanupType, DataStore, Governor, SetOption, StringKey};
-use resp_parser::RespParser;
+mod governor;
+mod resp;
+mod store;
 
-mod data_store;
-mod resp_parser;
-
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
-    let store = Arc::new(DataStore::new());
-
-    let governor = Governor::new(
-        Arc::clone(&store),
-        CleanupType::Scheduled(Duration::from_millis(10)),
-    );
-    governor.start_cleanup();
-
-    for stream in listener.incoming() {
-        let kv_store = Arc::clone(&store);
-        thread::spawn(move || {
-            handle_client(stream.unwrap(), kv_store);
-        });
-    }
-}
-
-// RESP2 data types
-enum DataType {
-    SimpleString,
-    SimpleError,
-    Integer,
-    BulkString,
-    Array,
-    None,
-}
-
-impl DataType {
-    fn from_char(c: char) -> Self {
-        match c {
-            '*' => DataType::Array,
-            '+' => DataType::SimpleString,
-            '-' => DataType::SimpleError,
-            '$' => DataType::BulkString,
-            ':' => DataType::Integer,
-            _ => DataType::None,
-        }
-    }
-    fn to_char(&self) -> char {
-        match self {
-            DataType::SimpleString => '+',
-            DataType::BulkString => '$',
-            DataType::Integer => ':',
-            DataType::Array => '*',
-            DataType::SimpleError => '-',
-            DataType::None => '\0',
-        }
-    }
-}
-
-fn get_set_options(args: Vec<&str>) -> Vec<SetOption> {
-    let mut options = Vec::new();
-    if args.is_empty() {
-        return options;
-    }
-
-    let mut iter = args.iter().peekable();
-
-    while let Some(opt) = iter.next() {
-        let upper_opt = opt.to_uppercase();
-
-        match upper_opt.as_str() {
-            "NX" => options.push(SetOption::NX),
-            "XX" => options.push(SetOption::XX),
-            "GET" => options.push(SetOption::GET),
-            "KEEPTTL" => options.push(SetOption::KEEPTTL),
-            "PX" => {
-                if let Some(next_arg) = iter.peek()
-                    && let Ok(milliseconds) = next_arg.parse::<u128>()
-                {
-                    options.push(SetOption::PX(milliseconds));
-                    iter.next();
-                }
-            }
-            "PXAT" => {
-                if let Some(next_arg) = iter.peek()
-                    && let Ok(milliseconds) = next_arg.parse::<u128>()
-                {
-                    options.push(SetOption::PXAT(milliseconds));
-                    iter.next();
-                }
-            }
-            "EX" => {
-                if let Some(next_arg) = iter.peek()
-                    && let Ok(seconds) = next_arg.parse::<u64>()
-                {
-                    options.push(SetOption::EX(seconds));
-                    iter.next();
-                }
-            }
-            "EXAT" => {
-                if let Some(next_arg) = iter.peek()
-                    && let Ok(seconds) = next_arg.parse::<u64>()
-                {
-                    options.push(SetOption::EXAT(seconds));
-                    iter.next();
-                }
-            }
-            "IFEQ" => {
-                if let Some(next_arg) = iter.peek() {
-                    options.push(SetOption::IFEQ(next_arg.to_string()));
-                    iter.next();
-                }
-            }
-            "IFNE" => {
-                if let Some(next_arg) = iter.peek() {
-                    options.push(SetOption::IFNE(next_arg.to_string()));
-                    iter.next();
-                }
-            }
-            "IFDEQ" => {
-                if let Some(next_arg) = iter.peek() {
-                    options.push(SetOption::IFDEQ(next_arg.to_string()));
-                    iter.next();
-                }
-            }
-            "IFDNE" => {
-                if let Some(next_arg) = iter.peek() {
-                    options.push(SetOption::IFDNE(next_arg.to_string()));
-                    iter.next();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    options
-}
-
-#[allow(dead_code)]
 enum Command {
     // connection
     Ping,
@@ -150,6 +20,29 @@ enum Command {
     Lrange(StringKey, i64, i64),
     Llen(StringKey),
     Lpop(StringKey, u8),
+    Blpop(StringKey, u64),
+}
+
+fn main() {
+    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+
+    let store = Arc::new(DataStore::new());
+
+    let governor = Governor::new(
+        Arc::clone(&store),
+        governor::Options {
+            cleanup_type: CleanupType::Scheduled(Duration::from_millis(10)),
+        },
+    );
+
+    governor.start();
+
+    for stream in listener.incoming() {
+        let kv_store = Arc::clone(&store);
+        thread::spawn(move || {
+            handle_client(stream.unwrap(), kv_store);
+        });
+    }
 }
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
@@ -162,7 +55,8 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
             Ok(n) => {
                 let input = String::from_utf8_lossy(&buffer[..n]);
                 let kv_store = Arc::clone(&store);
-                if let Some(cmd) = handle_input(&input) {
+
+                if let Some(cmd) = prepare_command(&input) {
                     handle_command(&mut stream, kv_store, cmd);
                 } else {
                     write_error_to_stream(&mut stream, "unable to handle request");
@@ -176,7 +70,7 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
     }
 }
 
-fn handle_input(data: &str) -> Option<Command> {
+fn prepare_command(data: &str) -> Option<Command> {
     let mut parser = RespParser::new(data);
 
     match DataType::from_char(parser.read_char().unwrap_or('\0')) {
@@ -211,11 +105,10 @@ fn handle_input(data: &str) -> Option<Command> {
                     }
                 }
                 "SET" => {
-                    dbg!(&command_parts);
                     if command_parts.len() >= 3 {
                         let mut options = Vec::new();
                         if command_parts.len() > 3 {
-                            options = get_set_options(command_parts[3..].to_vec());
+                            options = prepare_set_options(command_parts[3..].to_vec());
                         }
                         Some(Command::Set(
                             StringKey::from(command_parts[1]),
@@ -280,13 +173,17 @@ fn handle_input(data: &str) -> Option<Command> {
                         None
                     }
                 }
-                _ => {
-                    println!(
-                        "received unsupported command: {}",
-                        parser.data[parser.cursor..].trim()
-                    );
-                    None
+                "BLPOP" => {
+                    if command_parts.len() >= 3 {
+                        Some(Command::Blpop(
+                            StringKey::from(command_parts[1]),
+                            command_parts[2].parse().ok()?,
+                        ))
+                    } else {
+                        None
+                    }
                 }
+                _ => None,
             }
         }
         _ => {
@@ -466,7 +363,123 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error popping from list");
             }
         },
+        Command::Blpop(key, timeout) => match store.blpop(key.clone(), timeout) {
+            Ok(result) => {
+                if let Some(items) = result {
+                    let list_len = items.len();
+                    let mut resp_str = String::new();
+
+                    if list_len >= 1 {
+                        resp_str.push(DataType::Array.to_char());
+                        resp_str.push_str((list_len + 1).to_string().as_str());
+                        resp_str.push_str("\r\n");
+                        resp_str.push(DataType::BulkString.to_char());
+                        resp_str.push_str(key.len().to_string().as_str());
+                        resp_str.push_str("\r\n");
+                        resp_str.push_str(&key.to_string());
+                        resp_str.push_str("\r\n");
+                    }
+
+                    for item in items {
+                        resp_str.push(DataType::BulkString.to_char());
+                        resp_str.push_str(item.len().to_string().as_str());
+                        resp_str.push_str("\r\n");
+                        resp_str.push_str(&item.to_string());
+                        resp_str.push_str("\r\n");
+                    }
+
+                    dbg!(&resp_str);
+
+                    write_to_stream(stream, resp_str.as_bytes());
+                } else {
+                    write_error_to_stream(stream, "not a list or empty list");
+                }
+            }
+            Err(err) => {
+                eprintln!("error popping from list: {}", err);
+                write_error_to_stream(stream, "error popping from list");
+            }
+        },
     }
+}
+
+fn prepare_set_options(args: Vec<&str>) -> Vec<SetOption> {
+    let mut options = Vec::new();
+    if args.is_empty() {
+        return options;
+    }
+
+    let mut iter = args.iter().peekable();
+
+    while let Some(opt) = iter.next() {
+        let upper_opt = opt.to_uppercase();
+
+        match upper_opt.as_str() {
+            "NX" => options.push(SetOption::NX),
+            "XX" => options.push(SetOption::XX),
+            "GET" => options.push(SetOption::GET),
+            "KEEPTTL" => options.push(SetOption::KEEPTTL),
+            "PX" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(milliseconds) = next_arg.parse::<u128>()
+                {
+                    options.push(SetOption::PX(milliseconds));
+                    iter.next();
+                }
+            }
+            "PXAT" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(milliseconds) = next_arg.parse::<u128>()
+                {
+                    options.push(SetOption::PXAT(milliseconds));
+                    iter.next();
+                }
+            }
+            "EX" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(seconds) = next_arg.parse::<u64>()
+                {
+                    options.push(SetOption::EX(seconds));
+                    iter.next();
+                }
+            }
+            "EXAT" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(seconds) = next_arg.parse::<u64>()
+                {
+                    options.push(SetOption::EXAT(seconds));
+                    iter.next();
+                }
+            }
+            "IFEQ" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFEQ(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            "IFNE" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFNE(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            "IFDEQ" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFDEQ(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            "IFDNE" => {
+                if let Some(next_arg) = iter.peek() {
+                    options.push(SetOption::IFDNE(next_arg.to_string()));
+                    iter.next();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    options
 }
 
 fn write_to_stream(stream: &mut std::net::TcpStream, data: &[u8]) {
