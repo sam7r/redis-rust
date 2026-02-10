@@ -5,10 +5,11 @@ use std::{
     sync::{
         self,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
+    thread,
 };
 
-#[derive(Debug)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum SetOption {
     // Only set if the key does not exist
@@ -57,15 +58,15 @@ impl fmt::Display for DataStoreError {
 impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<StringKey, Value>>>>
     for DataStoreError
 {
-    fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<String, Value>>>) -> Self {
+    fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<StringKey, Value>>>) -> Self {
         DataStoreError::LockError
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<String, Value>>>>
+impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>>>>
     for DataStoreError
 {
-    fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<String, Value>>>) -> Self {
+    fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<StringKey, Value>>>) -> Self {
         DataStoreError::LockError
     }
 }
@@ -112,13 +113,7 @@ impl fmt::Display for Event {
     }
 }
 
-#[allow(dead_code)]
-fn get_id() -> usize {
-    static COUNTER: AtomicUsize = AtomicUsize::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-type Subscribers = Vec<(usize, sync::mpsc::Sender<Event>)>;
+type Subscribers = Vec<(usize, mpsc::Sender<Event>)>;
 
 pub struct DataStore {
     data: sync::RwLock<HashMap<StringKey, Value>>,
@@ -137,7 +132,7 @@ impl DataStore {
 
     pub fn set(
         &self,
-        key: String,
+        key: &str,
         value: String,
         _options: Vec<SetOption>,
     ) -> Result<Option<Value>, DataStoreError> {
@@ -174,13 +169,13 @@ impl DataStore {
                     self.expires
                         .write()
                         .unwrap()
-                        .insert(key.clone(), expire_time);
+                        .insert(String::from(key), expire_time);
                 }
                 SetOption::EXAT(seconds) => {
                     self.expires
                         .write()
                         .unwrap()
-                        .insert(key.clone(), seconds as u128 * 1000);
+                        .insert(String::from(key), seconds as u128 * 1000);
                 }
                 SetOption::PX(milliseconds) => {
                     let expire_time = std::time::SystemTime::now()
@@ -191,14 +186,14 @@ impl DataStore {
                     self.expires
                         .write()
                         .unwrap()
-                        .insert(key.clone(), expire_time);
+                        .insert(String::from(key), expire_time);
                 }
                 SetOption::PXAT(milliseconds) => {
                     let expire_time = milliseconds;
                     self.expires
                         .write()
                         .unwrap()
-                        .insert(key.clone(), expire_time);
+                        .insert(String::from(key), expire_time);
                 }
                 SetOption::KEEPTTL => {
                     // Do nothing, retain existing TTL
@@ -212,17 +207,17 @@ impl DataStore {
         for option in mod_options {
             match option {
                 SetOption::NX => {
-                    if data.contains_key(&key) {
+                    if data.contains_key(key) {
                         return Ok(None);
                     }
                 }
                 SetOption::XX => {
-                    if !data.contains_key(&key) {
+                    if !data.contains_key(key) {
                         return Ok(None);
                     }
                 }
                 SetOption::IFEQ(ifeq_value) => {
-                    if let Some(current_value) = data.get(&key) {
+                    if let Some(current_value) = data.get(key) {
                         if current_value != &ifeq_value {
                             return Ok(None);
                         }
@@ -231,7 +226,7 @@ impl DataStore {
                     }
                 }
                 SetOption::IFNE(ifne_value) => {
-                    if let Some(current_value) = data.get(&key)
+                    if let Some(current_value) = data.get(key)
                         && current_value == &ifne_value
                     {
                         return Ok(None);
@@ -244,18 +239,18 @@ impl DataStore {
             }
         }
 
-        data.insert(key, Value::String(value));
+        data.insert(String::from(key), Value::String(value));
 
         Ok(Some(Value::String("OK".to_string())))
     }
 
     pub fn lrange(
         &self,
-        key: StringKey,
+        key: &str,
         range: (i64, i64),
     ) -> Result<Option<Vec<String>>, DataStoreError> {
         let data = self.data.read()?;
-        if let Some(value) = data.get(&key) {
+        if let Some(value) = data.get(key) {
             match value {
                 Value::List(list) => {
                     let (mut start, mut stop) = range;
@@ -285,15 +280,11 @@ impl DataStore {
         }
     }
 
-    pub fn rpush(
-        &self,
-        key: StringKey,
-        value: Vec<String>,
-    ) -> Result<Option<usize>, DataStoreError> {
+    pub fn rpush(&self, key: &str, value: Vec<String>) -> Result<Option<usize>, DataStoreError> {
         let mut value_list = value;
         let mut data = self.data.write()?;
 
-        if let Some(existing_value) = data.get(&key).cloned() {
+        if let Some(existing_value) = data.get(key).cloned() {
             match existing_value {
                 Value::List(mut list) => {
                     list.extend(value_list);
@@ -304,23 +295,19 @@ impl DataStore {
         }
 
         let len = value_list.len();
-        data.insert(key.clone(), Value::List(value_list));
+        data.insert(String::from(key), Value::List(value_list));
 
-        self.publish_to_subscribers(key.clone(), Event::Pushed(key))?;
+        self.publish_to_subscribers(key, Event::Pushed(String::from(key)))?;
 
         Ok(Some(len))
     }
 
-    pub fn lpush(
-        &self,
-        key: StringKey,
-        value: Vec<String>,
-    ) -> Result<Option<usize>, DataStoreError> {
+    pub fn lpush(&self, key: &str, value: Vec<String>) -> Result<Option<usize>, DataStoreError> {
         let mut value_list = value;
         value_list.reverse();
         let mut data = self.data.write()?;
 
-        if let Some(existing_value) = data.get(&key).cloned() {
+        if let Some(existing_value) = data.get(key).cloned() {
             match existing_value {
                 Value::List(list) => {
                     value_list.extend(list);
@@ -330,9 +317,9 @@ impl DataStore {
         }
 
         let len = value_list.len();
-        data.insert(key.clone(), Value::List(value_list));
+        data.insert(String::from(key), Value::List(value_list));
 
-        self.publish_to_subscribers(key.clone(), Event::Pushed(key))?;
+        self.publish_to_subscribers(key, Event::Pushed(String::from(key)))?;
 
         Ok(Some(len))
     }
@@ -349,9 +336,9 @@ impl DataStore {
         }
     }
 
-    pub fn lpop(&self, key: StringKey, count: u8) -> Result<Option<Vec<String>>, DataStoreError> {
+    pub fn lpop(&self, key: &str, count: u8) -> Result<Option<Vec<String>>, DataStoreError> {
         let mut data = self.data.write()?;
-        if let Some(value) = data.get(&key).cloned() {
+        if let Some(value) = data.get(key).cloned() {
             match value {
                 Value::List(mut list) => {
                     let mut split_from = count;
@@ -360,9 +347,9 @@ impl DataStore {
                     }
 
                     let new_list = list.split_off(split_from as usize);
-                    data.insert(key.clone(), Value::List(new_list));
+                    data.insert(String::from(key), Value::List(new_list));
 
-                    self.publish_to_subscribers(key.clone(), Event::Pushed(key))?;
+                    self.publish_to_subscribers(key, Event::Pushed(String::from(key)))?;
 
                     Ok(Some(list))
                 }
@@ -375,36 +362,39 @@ impl DataStore {
 
     pub fn blpop(
         &self,
-        key: StringKey,
+        key: &str,
         wait_time_seconds: f32,
     ) -> Result<Option<Vec<String>>, DataStoreError> {
-        // early return if value is already available
-        if let Ok(v) = self.lpop(key.clone(), 1)
+        if let Ok(v) = self.try_lpop_one(key)
             && let Some(value) = v
-            && !value.is_empty()
         {
-            return Ok(Some(value));
+            return Ok(Some(vec![value]));
         }
 
-        let (sender, receiver) = sync::mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
 
         match self.add_channel_subscriber(key, sender.clone()) {
-            Ok(id) => {
+            Ok(sub_id) => {
                 if wait_time_seconds > 0f32 {
                     let closer = sender.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
-                        let _ = closer.send(Event::Close(id));
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
+                        let _ = closer.send(Event::Close(sub_id));
                     });
                 }
 
-                if let Ok(event) = receiver.recv() {
+                while let Ok(event) = receiver.recv() {
                     match event {
                         Event::Pushed(key) => {
-                            return self.lpop(key, 1);
+                            if let Ok(v) = self.try_lpop_one(&key)
+                                && let Some(value) = v
+                            {
+                                return Ok(Some(vec![value]));
+                            }
                         }
-                        Event::Close(n) => {
-                            if n == id {
+                        Event::Close(id) => {
+                            if id == sub_id {
+                                let _ = self.remove_channel_subscriber(key, id);
                                 return Ok(None);
                             }
                         }
@@ -431,16 +421,40 @@ impl DataStore {
         Ok(None)
     }
 
-    pub fn add_channel_subscriber(
+    pub fn get_type(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+        let data = self.data.read()?;
+        match data.get(key) {
+            Some(v) => Ok(Some(value_type_as_str(v).to_string())),
+            None => Ok(None),
+        }
+    }
+
+    fn try_lpop_one(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+        match self.lpop(key, 1) {
+            Ok(v) => match v {
+                Some(list) => {
+                    if !list.is_empty() {
+                        Ok(Some(list[0].to_string()))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                None => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn add_channel_subscriber(
         &self,
-        key: StringKey,
-        subscriber: sync::mpsc::Sender<Event>,
+        key: &str,
+        subscriber: mpsc::Sender<Event>,
     ) -> Result<usize, DataStoreError> {
         match self.channels.write() {
             Ok(mut channels) => {
                 let id = get_id();
                 channels
-                    .entry(key)
+                    .entry(String::from(key))
                     .or_insert_with(Vec::new)
                     .push((id, subscriber));
                 Ok(id)
@@ -449,14 +463,22 @@ impl DataStore {
         }
     }
 
-    pub fn publish_to_subscribers(
-        &self,
-        key: StringKey,
-        event: Event,
-    ) -> Result<(), DataStoreError> {
+    fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), DataStoreError> {
+        match self.channels.write() {
+            Ok(mut channels) => {
+                if let Some(subscribers) = channels.get_mut(key) {
+                    subscribers.retain(|(sub_id, _)| *sub_id != id);
+                }
+                Ok(())
+            }
+            Err(_) => Err(DataStoreError::LockError),
+        }
+    }
+
+    fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), DataStoreError> {
         match self.channels.read() {
             Ok(channels) => {
-                if let Some(subscribers) = channels.get(&key) {
+                if let Some(subscribers) = channels.get(key) {
                     for (_, subscriber) in subscribers {
                         let _ = subscriber.send(event.clone());
                     }
@@ -500,5 +522,17 @@ impl DataStore {
         }
 
         Ok(())
+    }
+}
+
+fn get_id() -> usize {
+    static COUNTER: AtomicUsize = AtomicUsize::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn value_type_as_str<'a>(v: &Value) -> &'a str {
+    match v {
+        Value::List(_) => "list",
+        Value::String(_) => "string",
     }
 }

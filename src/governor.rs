@@ -1,12 +1,12 @@
 use super::DataStore;
-use std::{sync, time};
+use std::{sync::Arc, thread, time};
 
 pub enum CleanupType {
-    Scheduled(time::Duration), // Cleanup every n milliseconds
+    Scheduled(time::Duration),
 }
 
 pub struct Governor {
-    datastore: sync::Arc<DataStore>,
+    datastore: Arc<DataStore>,
     cleanup_type: CleanupType,
 }
 
@@ -15,7 +15,7 @@ pub struct Options {
 }
 
 impl Governor {
-    pub fn new(datastore: sync::Arc<DataStore>, options: Options) -> Self {
+    pub fn new(datastore: Arc<DataStore>, options: Options) -> Self {
         Governor {
             datastore,
             cleanup_type: options.cleanup_type,
@@ -25,9 +25,9 @@ impl Governor {
     pub fn start(self) {
         match self.cleanup_type {
             CleanupType::Scheduled(interval) => {
-                std::thread::spawn(move || {
+                thread::spawn(move || {
                     loop {
-                        std::thread::sleep(interval);
+                        thread::sleep(interval);
                         self.datastore.cleanup();
                     }
                 });

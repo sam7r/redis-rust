@@ -1,5 +1,5 @@
 use governor::{CleanupType, Governor};
-use resp::{DataType, RespParser};
+use resp::{DataType, RespBuilder, RespParser};
 use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
 use store::{DataStore, SetOption, StringKey};
 
@@ -11,6 +11,7 @@ enum Command {
     // connection
     Ping,
     Echo(String),
+    Type(StringKey),
     // string
     Set(StringKey, String, Vec<SetOption>),
     Get(StringKey),
@@ -100,6 +101,13 @@ fn prepare_command(data: &str) -> Option<Command> {
                 "ECHO" => {
                     if command_parts.len() >= 2 {
                         Some(Command::Echo(command_parts[1].to_string()))
+                    } else {
+                        None
+                    }
+                }
+                "TYPE" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Type(StringKey::from(command_parts[1])))
                     } else {
                         None
                     }
@@ -199,36 +207,35 @@ fn prepare_command(data: &str) -> Option<Command> {
 fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, command: Command) {
     match command {
         Command::Ping => {
-            let mut resp_str = String::new();
-            resp_str.push(DataType::SimpleString.to_char());
-            resp_str.push_str("PONG");
-            resp_str.push_str("\r\n");
-
-            write_to_stream(stream, resp_str.as_bytes());
+            write_to_stream(
+                stream,
+                RespBuilder::new().add_simple_string("PONG").as_bytes(),
+            );
         }
         Command::Echo(echo) => {
-            let mut resp_str = String::new();
-            resp_str.push(DataType::BulkString.to_char());
-            resp_str.push_str(echo.len().to_string().as_str());
-            resp_str.push_str("\r\n");
-            resp_str.push_str(&echo);
-            resp_str.push_str("\r\n");
-
-            write_to_stream(stream, resp_str.as_bytes());
+            write_to_stream(stream, RespBuilder::new().add_bulk_string(&echo).as_bytes());
         }
-        Command::Set(key, value, options) => match store.set(key, value, options) {
-            Ok(v) => {
-                let mut resp_str = String::new();
-                resp_str.push(DataType::SimpleString.to_char());
-
-                if let Some(result) = v {
-                    resp_str.push_str(&result.to_string());
+        Command::Type(key) => match store.get_type(&key) {
+            Ok(t) => {
+                let mut resp = RespBuilder::new();
+                if let Some(value_type) = t {
+                    resp.add_simple_string(&value_type);
                 } else {
-                    resp_str.push_str("OK");
+                    resp.add_simple_string("none");
                 }
-
-                resp_str.push_str("\r\n");
-                write_to_stream(stream, resp_str.as_bytes());
+                write_to_stream(stream, resp.as_bytes());
+            }
+            Err(_) => write_error_to_stream(stream, "failed to get type"),
+        },
+        Command::Set(key, value, options) => match store.set(&key, value, options) {
+            Ok(v) => {
+                let mut resp = RespBuilder::new();
+                if let Some(result) = v {
+                    resp.add_simple_string(&result.to_string());
+                } else {
+                    resp.add_simple_string("OK");
+                }
+                write_to_stream(stream, resp.as_bytes());
             }
             Err(err) => {
                 eprintln!("error setting value: {}", err);
@@ -237,33 +244,26 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
         },
         Command::Get(value) => match store.get(&value) {
             Ok(result) => {
-                let mut resp_str = String::new();
-                resp_str.push(DataType::BulkString.to_char());
-
+                let mut resp = RespBuilder::new();
                 if let Some(v) = result {
-                    resp_str.push_str(v.to_string().len().to_string().as_str());
-                    resp_str.push_str("\r\n");
-                    resp_str.push_str(&v.to_string());
+                    resp.add_bulk_string(&v.to_string());
                 } else {
-                    resp_str.push_str("-1");
+                    resp.negative_bulk_string();
                 }
-
-                resp_str.push_str("\r\n");
-                write_to_stream(stream, resp_str.as_bytes());
+                write_to_stream(stream, resp.as_bytes());
             }
             Err(err) => {
                 eprintln!("error getting value: {}", err);
                 write_error_to_stream(stream, "error getting value");
             }
         },
-        Command::Rpush(key, list) => match store.rpush(key, list) {
+        Command::Rpush(key, list) => match store.rpush(&key, list) {
             Ok(result) => {
                 if let Some(n) = result {
-                    let mut resp_str = String::new();
-                    resp_str.push(DataType::Integer.to_char());
-                    resp_str.push_str(&n.to_string());
-                    resp_str.push_str("\r\n");
-                    write_to_stream(stream, resp_str.as_bytes());
+                    write_to_stream(
+                        stream,
+                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
+                    );
                 } else {
                     write_error_to_stream(stream, "not a list");
                 }
@@ -273,14 +273,13 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error pushing to list");
             }
         },
-        Command::Lpush(key, list) => match store.lpush(key, list) {
+        Command::Lpush(key, list) => match store.lpush(&key, list) {
             Ok(result) => {
                 if let Some(n) = result {
-                    let mut resp_str = String::new();
-                    resp_str.push(DataType::Integer.to_char());
-                    resp_str.push_str(&n.to_string());
-                    resp_str.push_str("\r\n");
-                    write_to_stream(stream, resp_str.as_bytes());
+                    write_to_stream(
+                        stream,
+                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
+                    );
                 } else {
                     write_error_to_stream(stream, "not a list");
                 }
@@ -290,23 +289,15 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error pushing to list");
             }
         },
-        Command::Lrange(key, start, stop) => match store.lrange(key, (start, stop)) {
+        Command::Lrange(key, start, stop) => match store.lrange(&key, (start, stop)) {
             Ok(result) => {
                 if let Some(list) = result {
-                    let mut resp_str = String::new();
-                    resp_str.push(DataType::Array.to_char());
-                    resp_str.push_str(list.len().to_string().as_str());
-                    resp_str.push_str("\r\n");
-
+                    let mut resp = RespBuilder::new();
+                    resp.add_array(&list.len());
                     list.iter().for_each(|item| {
-                        resp_str.push(DataType::BulkString.to_char());
-                        resp_str.push_str(item.len().to_string().as_str());
-                        resp_str.push_str("\r\n");
-                        resp_str.push_str(item);
-                        resp_str.push_str("\r\n");
+                        resp.add_bulk_string(item);
                     });
-
-                    write_to_stream(stream, resp_str.as_bytes());
+                    write_to_stream(stream, resp.as_bytes());
                 } else {
                     write_error_to_stream(stream, "not a list");
                 }
@@ -319,11 +310,10 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
         Command::Llen(key) => match store.llen(key) {
             Ok(result) => {
                 if let Some(n) = result {
-                    let mut resp_str = String::new();
-                    resp_str.push(DataType::Integer.to_char());
-                    resp_str.push_str(&n.to_string());
-                    resp_str.push_str("\r\n");
-                    write_to_stream(stream, resp_str.as_bytes());
+                    write_to_stream(
+                        stream,
+                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
+                    );
                 } else {
                     write_error_to_stream(stream, "not a list");
                 }
@@ -333,27 +323,17 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error getting list length");
             }
         },
-        Command::Lpop(key, count) => match store.lpop(key, count) {
+        Command::Lpop(key, count) => match store.lpop(&key, count) {
             Ok(result) => {
-                if let Some(items) = result {
-                    let list_len = items.len();
-                    let mut resp_str = String::new();
-
-                    if list_len > 1 {
-                        resp_str.push(DataType::Array.to_char());
-                        resp_str.push_str(list_len.to_string().as_str());
-                        resp_str.push_str("\r\n");
+                if let Some(list) = result {
+                    let mut resp = RespBuilder::new();
+                    if list.len() > 1 {
+                        resp.add_array(&list.len());
                     }
-
-                    for item in items {
-                        resp_str.push(DataType::BulkString.to_char());
-                        resp_str.push_str(item.len().to_string().as_str());
-                        resp_str.push_str("\r\n");
-                        resp_str.push_str(&item.to_string());
-                        resp_str.push_str("\r\n");
-                    }
-
-                    write_to_stream(stream, resp_str.as_bytes());
+                    list.iter().for_each(|item| {
+                        resp.add_bulk_string(item);
+                    });
+                    write_to_stream(stream, resp.as_bytes());
                 } else {
                     write_error_to_stream(stream, "not a list or empty list");
                 }
@@ -363,39 +343,21 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, "error popping from list");
             }
         },
-        Command::Blpop(key, timeout) => match store.blpop(key.clone(), timeout) {
+        Command::Blpop(key, timeout) => match store.blpop(&key, timeout) {
             Ok(result) => match result {
-                Some(items) => {
-                    let list_len = items.len();
-                    let mut resp_str = String::new();
-
-                    if list_len >= 1 {
-                        resp_str.push(DataType::Array.to_char());
-                        resp_str.push_str((list_len + 1).to_string().as_str());
-                        resp_str.push_str("\r\n");
-                        resp_str.push(DataType::BulkString.to_char());
-                        resp_str.push_str(key.len().to_string().as_str());
-                        resp_str.push_str("\r\n");
-                        resp_str.push_str(&key.to_string());
-                        resp_str.push_str("\r\n");
-                    }
-
-                    for item in items {
-                        resp_str.push(DataType::BulkString.to_char());
-                        resp_str.push_str(item.len().to_string().as_str());
-                        resp_str.push_str("\r\n");
-                        resp_str.push_str(&item.to_string());
-                        resp_str.push_str("\r\n");
-                    }
-
-                    write_to_stream(stream, resp_str.as_bytes());
+                Some(list) => {
+                    let mut resp = RespBuilder::new();
+                    resp.add_array(&(list.len() + 1));
+                    resp.add_bulk_string(&key);
+                    list.iter().for_each(|item| {
+                        resp.add_bulk_string(item);
+                    });
+                    write_to_stream(stream, resp.as_bytes());
                 }
                 None => {
-                    let mut resp_str = String::new();
-                    resp_str.push(DataType::Array.to_char());
-                    resp_str.push_str("-1");
-                    resp_str.push_str("\r\n");
-                    write_to_stream(stream, resp_str.as_bytes());
+                    let mut resp = RespBuilder::new();
+                    resp.negative_array();
+                    write_to_stream(stream, resp.as_bytes());
                 }
             },
             Err(err) => {
@@ -494,9 +456,8 @@ fn write_to_stream(stream: &mut std::net::TcpStream, data: &[u8]) {
 }
 
 fn write_error_to_stream(stream: &mut std::net::TcpStream, message: &str) {
-    let mut resp_str = String::new();
-    resp_str.push(DataType::SimpleError.to_char());
-    resp_str.push_str(message);
-    resp_str.push_str("\r\n");
-    write_to_stream(stream, resp_str.as_bytes());
+    write_to_stream(
+        stream,
+        RespBuilder::new().add_simple_error(message).as_bytes(),
+    );
 }

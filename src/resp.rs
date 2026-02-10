@@ -36,6 +36,73 @@ impl DataType {
     }
 }
 
+pub struct RespBuilder {
+    data: String,
+}
+
+impl RespBuilder {
+    pub fn new() -> Self {
+        RespBuilder {
+            data: String::new(),
+        }
+    }
+
+    pub fn add_simple_string(&mut self, value: &str) -> &mut Self {
+        self.data.push(DataType::SimpleString.to_char());
+        self.data.push_str(value);
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn add_bulk_string(&mut self, value: &str) -> &mut Self {
+        self.data.push(DataType::BulkString.to_char());
+        self.data.push_str(value.len().to_string().as_str());
+        self.data.push_str("\r\n");
+        self.data.push_str(value);
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn negative_bulk_string(&mut self) -> &mut Self {
+        self.data.push(DataType::BulkString.to_char());
+        self.data.push_str("-1");
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn add_integer(&mut self, value: &str) -> &mut Self {
+        self.data.push(DataType::Integer.to_char());
+        self.data.push_str(value);
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn add_array(&mut self, size: &usize) -> &mut Self {
+        self.data.push(DataType::Array.to_char());
+        self.data.push_str(&size.to_string());
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn negative_array(&mut self) -> &mut Self {
+        self.data.push(DataType::Array.to_char());
+        self.data.push_str("-1");
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn add_simple_error(&mut self, message: &str) -> &mut Self {
+        self.data.push(DataType::SimpleError.to_char());
+        self.data.push_str(message);
+        self.data.push_str("\r\n");
+        self
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data.as_bytes()
+    }
+}
+
 impl<'a> RespParser<'a> {
     pub fn new(data: &'a str) -> Self {
         RespParser { data, cursor: 0 }
