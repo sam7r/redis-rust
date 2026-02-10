@@ -1,7 +1,7 @@
 use governor::{CleanupType, Governor};
 use resp::{DataType, RespBuilder, RespParser};
 use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
-use store::{DataStore, SetOption, StreamEntryId, StreamKey, StringKey};
+use store::{DataStore, SetOption, StreamKey, StringKey};
 
 mod governor;
 mod resp;
@@ -23,7 +23,7 @@ enum Command {
     Lpop(StringKey, u8),
     Blpop(StringKey, f32),
     // srteam
-    Xadd(StreamKey, StreamEntryId, Vec<(String, String)>),
+    Xadd(StreamKey, StringKey, Vec<(String, String)>),
 }
 
 fn main() {
@@ -196,7 +196,7 @@ fn prepare_command(data: &str) -> Option<Command> {
                 "XADD" => {
                     if command_parts.len() >= 4 {
                         let stream_key = StreamKey::from(command_parts[1]);
-                        let entry_id = StreamEntryId::from(command_parts[2]);
+                        let entry_id = String::from(command_parts[2]);
                         let mut fields = Vec::new();
                         for i in (3..command_parts.len()).step_by(2) {
                             if let Some(field) = command_parts.get(i)
