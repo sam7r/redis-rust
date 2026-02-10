@@ -1,7 +1,7 @@
 use governor::{CleanupType, Governor};
 use resp::{DataType, RespBuilder, RespParser};
 use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
-use store::{DataStore, SetOption, StringKey};
+use store::{DataStore, SetOption, StreamEntryId, StreamKey, StringKey};
 
 mod governor;
 mod resp;
@@ -22,6 +22,8 @@ enum Command {
     Llen(StringKey),
     Lpop(StringKey, u8),
     Blpop(StringKey, f32),
+    // srteam
+    Xadd(StreamKey, StreamEntryId, Vec<(String, String)>),
 }
 
 fn main() {
@@ -191,6 +193,25 @@ fn prepare_command(data: &str) -> Option<Command> {
                         None
                     }
                 }
+                "XADD" => {
+                    if command_parts.len() >= 4 {
+                        let stream_key = StreamKey::from(command_parts[1]);
+                        let entry_id = StreamEntryId::from(command_parts[2]);
+                        let mut fields = Vec::new();
+                        for i in (3..command_parts.len()).step_by(2) {
+                            if let Some(field) = command_parts.get(i)
+                                && let Some(value) = command_parts.get(i + 1)
+                            {
+                                fields.push((field.to_string(), value.to_string()));
+                            } else {
+                                return None; // Invalid field-value pair
+                            }
+                        }
+                        Some(Command::Xadd(stream_key, entry_id, fields))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }
@@ -238,8 +259,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_to_stream(stream, resp.as_bytes());
             }
             Err(err) => {
-                eprintln!("error setting value: {}", err);
-                write_error_to_stream(stream, "error setting value");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Get(value) => match store.get(&value) {
@@ -253,8 +273,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_to_stream(stream, resp.as_bytes());
             }
             Err(err) => {
-                eprintln!("error getting value: {}", err);
-                write_error_to_stream(stream, "error getting value");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Rpush(key, list) => match store.rpush(&key, list) {
@@ -269,8 +288,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             }
             Err(err) => {
-                eprintln!("error pushing to list: {}", err);
-                write_error_to_stream(stream, "error pushing to list");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Lpush(key, list) => match store.lpush(&key, list) {
@@ -285,8 +303,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             }
             Err(err) => {
-                eprintln!("error pushing to list: {}", err);
-                write_error_to_stream(stream, "error pushing to list");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Lrange(key, start, stop) => match store.lrange(&key, (start, stop)) {
@@ -303,8 +320,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             }
             Err(err) => {
-                eprintln!("error getting list range: {}", err);
-                write_error_to_stream(stream, "error getting list range");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Llen(key) => match store.llen(key) {
@@ -319,8 +335,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             }
             Err(err) => {
-                eprintln!("error getting list length: {}", err);
-                write_error_to_stream(stream, "error getting list length");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Lpop(key, count) => match store.lpop(&key, count) {
@@ -339,8 +354,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             }
             Err(err) => {
-                eprintln!("error popping from list: {}", err);
-                write_error_to_stream(stream, "error popping from list");
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
         Command::Blpop(key, timeout) => match store.blpop(&key, timeout) {
@@ -361,8 +375,19 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             },
             Err(err) => {
-                eprintln!("error popping from list: {}", err);
-                write_error_to_stream(stream, "error popping from list");
+                write_error_to_stream(stream, err.to_string().as_str());
+            }
+        },
+        Command::Xadd(key, entry_id, fields) => match store.xadd(&key, &entry_id, fields) {
+            Ok(result) => {
+                if let Some(id) = result {
+                    write_to_stream(stream, RespBuilder::new().add_bulk_string(&id).as_bytes());
+                } else {
+                    write_error_to_stream(stream, "not a stream");
+                }
+            }
+            Err(err) => {
+                write_error_to_stream(stream, err.to_string().as_str());
             }
         },
     }

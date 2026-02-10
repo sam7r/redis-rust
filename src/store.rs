@@ -72,11 +72,14 @@ impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>
 }
 
 pub type StringKey = String;
+pub type StreamKey = String;
+pub type StreamEntryId = String;
 
 #[derive(Clone)]
 pub enum Value {
     String(String),
     List(Vec<String>),
+    Stream(HashMap<StreamEntryId, Vec<(String, String)>>),
 }
 
 impl cmp::PartialEq<String> for Value {
@@ -88,29 +91,10 @@ impl cmp::PartialEq<String> for Value {
     }
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::String(s) => write!(f, "{}", s),
-            Value::List(l) => write!(f, "{:?}", l),
-        }
-    }
-}
-
-#[allow(dead_code)]
 #[derive(Clone)]
 pub enum Event {
     Pushed(StringKey),
     Close(usize),
-}
-
-impl fmt::Display for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Event::Pushed(key) => write!(f, "pushed to key: {}", key),
-            Event::Close(_) => write!(f, "close event"),
-        }
-    }
 }
 
 type Subscribers = Vec<(usize, mpsc::Sender<Event>)>;
@@ -130,12 +114,51 @@ impl DataStore {
         }
     }
 
+    pub fn xadd(
+        &self,
+        key: &str,
+        entry_id: &str,
+        fields: Vec<(String, String)>,
+    ) -> Result<Option<String>, DataStoreError> {
+        let mut data = self.data.write()?;
+        if let Some(value) = data.get(key).cloned() {
+            match value {
+                Value::Stream(mut stream) => {
+                    stream
+                        .entry(entry_id.to_string())
+                        .or_insert_with(Vec::new)
+                        .extend(fields);
+                }
+                _ => return Ok(None),
+            }
+        } else {
+            let mut stream = HashMap::new();
+            stream.insert(String::from(entry_id), fields);
+            data.insert(String::from(key), Value::Stream(stream));
+        }
+        Ok(Some(String::from(entry_id)))
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+        let data = self.data.read()?;
+        let value = data.get(key).cloned();
+
+        if let Some(v) = value {
+            match v {
+                Value::String(result) => return Ok(Some(result)),
+                _ => return Ok(None), // Key exists but is not a string
+            }
+        }
+
+        Ok(None)
+    }
+
     pub fn set(
         &self,
         key: &str,
         value: String,
         _options: Vec<SetOption>,
-    ) -> Result<Option<Value>, DataStoreError> {
+    ) -> Result<Option<String>, DataStoreError> {
         let mut ttl_options = Vec::new();
         let mut mod_options = Vec::new();
 
@@ -241,7 +264,7 @@ impl DataStore {
 
         data.insert(String::from(key), Value::String(value));
 
-        Ok(Some(Value::String("OK".to_string())))
+        Ok(Some("OK".to_string()))
     }
 
     pub fn lrange(
@@ -407,85 +430,11 @@ impl DataStore {
         Ok(None)
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<String>, DataStoreError> {
-        let data = self.data.read()?;
-        let value = data.get(key).cloned();
-
-        if let Some(v) = value {
-            match v {
-                Value::String(result) => return Ok(Some(result)),
-                _ => return Ok(None), // Key exists but is not a string
-            }
-        }
-
-        Ok(None)
-    }
-
     pub fn get_type(&self, key: &str) -> Result<Option<String>, DataStoreError> {
         let data = self.data.read()?;
         match data.get(key) {
             Some(v) => Ok(Some(value_type_as_str(v).to_string())),
             None => Ok(None),
-        }
-    }
-
-    fn try_lpop_one(&self, key: &str) -> Result<Option<String>, DataStoreError> {
-        match self.lpop(key, 1) {
-            Ok(v) => match v {
-                Some(list) => {
-                    if !list.is_empty() {
-                        Ok(Some(list[0].to_string()))
-                    } else {
-                        Ok(None)
-                    }
-                }
-                None => Ok(None),
-            },
-            Err(_) => Ok(None),
-        }
-    }
-
-    fn add_channel_subscriber(
-        &self,
-        key: &str,
-        subscriber: mpsc::Sender<Event>,
-    ) -> Result<usize, DataStoreError> {
-        match self.channels.write() {
-            Ok(mut channels) => {
-                let id = get_id();
-                channels
-                    .entry(String::from(key))
-                    .or_insert_with(Vec::new)
-                    .push((id, subscriber));
-                Ok(id)
-            }
-            Err(_) => Err(DataStoreError::LockError),
-        }
-    }
-
-    fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), DataStoreError> {
-        match self.channels.write() {
-            Ok(mut channels) => {
-                if let Some(subscribers) = channels.get_mut(key) {
-                    subscribers.retain(|(sub_id, _)| *sub_id != id);
-                }
-                Ok(())
-            }
-            Err(_) => Err(DataStoreError::LockError),
-        }
-    }
-
-    fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), DataStoreError> {
-        match self.channels.read() {
-            Ok(channels) => {
-                if let Some(subscribers) = channels.get(key) {
-                    for (_, subscriber) in subscribers {
-                        let _ = subscriber.send(event.clone());
-                    }
-                }
-                Ok(())
-            }
-            Err(_) => Err(DataStoreError::LockError),
         }
     }
 
@@ -523,9 +472,69 @@ impl DataStore {
 
         Ok(())
     }
+
+    fn try_lpop_one(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+        match self.lpop(key, 1) {
+            Ok(v) => match v {
+                Some(list) => {
+                    if !list.is_empty() {
+                        Ok(Some(list[0].to_string()))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                None => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn add_channel_subscriber(
+        &self,
+        key: &str,
+        subscriber: mpsc::Sender<Event>,
+    ) -> Result<usize, DataStoreError> {
+        match self.channels.write() {
+            Ok(mut channels) => {
+                let id = create_subscriber_id();
+                channels
+                    .entry(String::from(key))
+                    .or_insert_with(Vec::new)
+                    .push((id, subscriber));
+                Ok(id)
+            }
+            Err(_) => Err(DataStoreError::LockError),
+        }
+    }
+
+    fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), DataStoreError> {
+        match self.channels.write() {
+            Ok(mut channels) => {
+                if let Some(subscribers) = channels.get_mut(key) {
+                    subscribers.retain(|(sub_id, _)| *sub_id != id);
+                }
+                Ok(())
+            }
+            Err(_) => Err(DataStoreError::LockError),
+        }
+    }
+
+    fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), DataStoreError> {
+        match self.channels.read() {
+            Ok(channels) => {
+                if let Some(subscribers) = channels.get(key) {
+                    for (_, subscriber) in subscribers {
+                        let _ = subscriber.send(event.clone());
+                    }
+                }
+                Ok(())
+            }
+            Err(_) => Err(DataStoreError::LockError),
+        }
+    }
 }
 
-fn get_id() -> usize {
+fn create_subscriber_id() -> usize {
     static COUNTER: AtomicUsize = AtomicUsize::new(1);
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
@@ -534,5 +543,6 @@ fn value_type_as_str<'a>(v: &Value) -> &'a str {
     match v {
         Value::List(_) => "list",
         Value::String(_) => "string",
+        Value::Stream(_) => "stream",
     }
 }
