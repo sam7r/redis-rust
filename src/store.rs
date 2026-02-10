@@ -141,24 +141,27 @@ impl DataStore {
         let mut entry_seq: usize = 0;
         let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
 
+        // use the defaults
         if entry_id_str != "*" {
             if entry_id_str_split.len() != 2 {
                 return Err(DataStoreError::InvalidStreamEntryId);
             }
+            match entry_id_str_split[0].parse::<u128>().ok() {
+                Some(millis) => entry_millis = millis,
+                None => return Err(DataStoreError::InvalidStreamEntryId),
+            }
             if entry_id_str_split[1] != "*" {
-                match entry_id_str_split[0].parse::<u128>().ok() {
-                    Some(millis) => entry_millis = millis,
-                    None => return Err(DataStoreError::InvalidStreamEntryId),
-                }
                 match entry_id_str_split[1].parse::<usize>().ok() {
                     Some(seq) => entry_seq = seq,
                     None => return Err(DataStoreError::InvalidStreamEntryId),
                 }
-            }
-            if entry_millis == 0 && entry_seq == 0 {
-                return Err(DataStoreError::StreamEntryIdMustBeGreaterThan(
-                    "0-0".to_string(),
-                ));
+                if entry_millis == 0 && entry_seq == 0 {
+                    return Err(DataStoreError::StreamEntryIdMustBeGreaterThan(
+                        "0-0".to_string(),
+                    ));
+                }
+            } else if entry_millis == 0 {
+                entry_seq = 1; // avoid 0-0 entry id
             }
         }
 
@@ -167,17 +170,17 @@ impl DataStore {
             match value {
                 Value::Stream(mut stream) => {
                     // get the last entry, check millis is greater or equal to the new entry
-                    // if equal, increment seq number
-                    if let Some((last_entry_id, _)) = stream.iter().max_by_key(|((t, x), _)| (t, x))
-                    {
+                    if let Some((last_entry_id, _)) = stream.iter().max_by_key(|(k, _)| *k) {
                         if entry_millis < last_entry_id.0 {
                             return Err(DataStoreError::StreamEntryIdLessThanLastEntry);
                         }
-                        if entry_id_str_split[1] == "*" {
-                            entry_seq = last_entry_id.1 + 1;
-                        }
-                        if entry_millis == last_entry_id.0 && entry_seq <= last_entry_id.1 {
-                            return Err(DataStoreError::StreamEntryIdLessThanLastEntry);
+                        if entry_millis == last_entry_id.0 {
+                            // if given a wildcard for sequence and the millis is the same, increment
+                            if entry_id_str_split.len() > 1 && entry_id_str_split[1] == "*" {
+                                entry_seq = last_entry_id.1 + 1;
+                            } else if entry_seq <= last_entry_id.1 {
+                                return Err(DataStoreError::StreamEntryIdLessThanLastEntry);
+                            }
                         }
                     }
                     stream
