@@ -139,6 +139,11 @@ impl DataStore {
         if entry_id_start_str == "-" {
             entry_id_start_str = "0-0";
         }
+        let entry_id_stop_str = if entry_id_stop_str == "+" {
+            &format!("{}-{}", u128::MAX, usize::MAX)
+        } else {
+            entry_id_stop_str
+        };
 
         let entry_id_start_str_split: Vec<&str> = entry_id_start_str.split("-").collect();
         let entry_id_stop_str_split: Vec<&str> = entry_id_stop_str.split("-").collect();
