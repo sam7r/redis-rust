@@ -24,6 +24,7 @@ enum Command {
     Blpop(StringKey, f32),
     // srteam
     Xadd(StreamKey, StringKey, Vec<(String, String)>),
+    Xrange(StreamKey, StringKey, StringKey),
 }
 
 fn main() {
@@ -212,6 +213,17 @@ fn prepare_command(data: &str) -> Option<Command> {
                         None
                     }
                 }
+                "XRANGE" => {
+                    if command_parts.len() >= 4 {
+                        let stream_key = StreamKey::from(command_parts[1]);
+                        let entry_id_start = String::from(command_parts[2]);
+                        let entry_id_stop = String::from(command_parts[3]);
+
+                        Some(Command::Xrange(stream_key, entry_id_start, entry_id_stop))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }
@@ -390,6 +402,31 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, err.to_string().as_str());
             }
         },
+        Command::Xrange(key, entry_id_start, entry_id_stop) => {
+            match store.xrange(&key, &entry_id_start, &entry_id_stop) {
+                Ok(result) => {
+                    if let Some(stream_range) = result {
+                        let mut resp = RespBuilder::new();
+                        resp.add_array(&stream_range.len());
+                        for ((entry_millis, entry_seq), items) in stream_range.iter() {
+                            resp.add_array(&2);
+                            resp.add_bulk_string(&format!("{}-{}", entry_millis, entry_seq));
+                            resp.add_array(&(items.len() * 2));
+                            for (field, value) in items {
+                                resp.add_bulk_string(field);
+                                resp.add_bulk_string(value);
+                            }
+                        }
+                        write_to_stream(stream, resp.as_bytes());
+                    } else {
+                        write_error_to_stream(stream, "not a stream");
+                    }
+                }
+                Err(err) => {
+                    write_error_to_stream(stream, err.to_string().as_str());
+                }
+            }
+        }
     }
 }
 

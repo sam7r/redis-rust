@@ -1,6 +1,6 @@
 use std::{
     cmp,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt,
     sync::{
         self,
@@ -88,12 +88,13 @@ impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>
 pub type StringKey = String;
 pub type StreamKey = String;
 pub type StreamEntryId = (u128, usize);
+pub type StreamEntry = BTreeMap<StreamEntryId, Vec<(String, String)>>;
 
 #[derive(Clone)]
 pub enum Value {
     String(String),
     List(Vec<String>),
-    Stream(HashMap<StreamEntryId, Vec<(String, String)>>),
+    Stream(StreamEntry),
 }
 
 impl cmp::PartialEq<String> for Value {
@@ -128,20 +129,73 @@ impl DataStore {
         }
     }
 
+    pub fn xrange(
+        &self,
+        key: &str,
+        entry_id_start_str: &str,
+        entry_id_stop_str: &str,
+    ) -> Result<Option<StreamEntry>, DataStoreError> {
+        let entry_id_start_str_split: Vec<&str> = entry_id_start_str.split("-").collect();
+        let entry_id_stop_str_split: Vec<&str> = entry_id_stop_str.split("-").collect();
+
+        if entry_id_start_str_split.is_empty() || entry_id_stop_str_split.is_empty() {
+            return Err(DataStoreError::InvalidStreamEntryId);
+        }
+        let Ok(entry_id_start_millis) = entry_id_start_str_split[0].parse::<u128>() else {
+            return Err(DataStoreError::InvalidStreamEntryId);
+        };
+        let Ok(entry_id_stop_millis) = entry_id_stop_str_split[0].parse::<u128>() else {
+            return Err(DataStoreError::InvalidStreamEntryId);
+        };
+
+        let mut entry_id_start_seq = 0;
+        if entry_id_start_str_split.len() > 1 {
+            let Ok(v) = entry_id_start_str_split[1].parse::<usize>() else {
+                return Err(DataStoreError::InvalidStreamEntryId);
+            };
+            entry_id_start_seq = v;
+        }
+
+        let data = self.data.read()?;
+        match data.get(key) {
+            Some(Value::Stream(stream)) => {
+                let mut entry_id_stop_seq;
+                entry_id_stop_seq = stream.len();
+
+                if entry_id_stop_str_split.len() > 1 {
+                    let Ok(seq) = entry_id_stop_str_split[1].parse::<usize>() else {
+                        return Err(DataStoreError::InvalidStreamEntryId);
+                    };
+                    entry_id_stop_seq = seq;
+                }
+
+                let start_entry_id = (entry_id_start_millis, entry_id_start_seq);
+                let stop_entry_id = (entry_id_stop_millis, entry_id_stop_seq);
+
+                let range: StreamEntry = stream
+                    .range(start_entry_id..=stop_entry_id)
+                    .map(|(&k, v)| (k, v.clone()))
+                    .collect::<StreamEntry>();
+
+                Ok(Some(range))
+            }
+            Some(_) | None => Ok(None),
+        }
+    }
+
     pub fn xadd(
         &self,
         key: &str,
         entry_id_str: &str,
         fields: Vec<(String, String)>,
     ) -> Result<Option<String>, DataStoreError> {
+        let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
+        let mut entry_seq: usize = 0;
         let mut entry_millis: u128 = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let mut entry_seq: usize = 0;
-        let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
 
-        // use the defaults
         if entry_id_str != "*" {
             if entry_id_str_split.len() != 2 {
                 return Err(DataStoreError::InvalidStreamEntryId);
@@ -161,7 +215,7 @@ impl DataStore {
                     ));
                 }
             } else if entry_millis == 0 {
-                entry_seq = 1; // avoid 0-0 entry id
+                entry_seq = 1; // if we're given 0-*, avoid 0-0 entry id
             }
         }
 
@@ -170,7 +224,7 @@ impl DataStore {
             match value {
                 Value::Stream(mut stream) => {
                     // get the last entry, check millis is greater or equal to the new entry
-                    if let Some((last_entry_id, _)) = stream.iter().max_by_key(|(k, _)| *k) {
+                    if let Some((last_entry_id, _)) = stream.iter().next_back() {
                         if entry_millis < last_entry_id.0 {
                             return Err(DataStoreError::StreamEntryIdLessThanLastEntry);
                         }
@@ -183,24 +237,21 @@ impl DataStore {
                             }
                         }
                     }
-                    stream
-                        .entry((entry_millis, entry_seq))
-                        .or_insert_with(Vec::new)
-                        .extend(fields);
 
+                    stream.insert((entry_millis, entry_seq), fields);
                     data.insert(String::from(key), Value::Stream(stream));
 
-                    return Ok(Some(format!("{}-{}", entry_millis, entry_seq)));
+                    Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
                 }
-                _ => return Ok(None),
+                _ => Ok(None),
             }
         } else {
-            let mut stream = HashMap::new();
+            let mut stream = BTreeMap::new();
             stream.insert((entry_millis, entry_seq), fields);
             data.insert(String::from(key), Value::Stream(stream));
-        }
 
-        Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
+            Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
+        }
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>, DataStoreError> {
