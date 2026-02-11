@@ -135,6 +135,11 @@ impl DataStore {
         entry_id_start_str: &str,
         entry_id_stop_str: &str,
     ) -> Result<Option<StreamEntry>, DataStoreError> {
+        let mut entry_id_start_str = entry_id_start_str;
+        if entry_id_start_str == "-" {
+            entry_id_start_str = "0-0";
+        }
+
         let entry_id_start_str_split: Vec<&str> = entry_id_start_str.split("-").collect();
         let entry_id_stop_str_split: Vec<&str> = entry_id_stop_str.split("-").collect();
 
