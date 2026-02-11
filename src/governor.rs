@@ -1,4 +1,4 @@
-use super::DataStore;
+use super::store::DataStore;
 use std::{sync::Arc, thread, time};
 
 pub enum CleanupType {
