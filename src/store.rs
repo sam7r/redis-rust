@@ -153,6 +153,73 @@ impl DataStore {
         }
     }
 
+    fn xrange_wait_for(
+        &self,
+        stream_key: &str,
+        entry_id: Option<(u128, usize)>,
+        count: Option<usize>,
+        block: Option<u64>,
+    ) -> Result<Option<StreamEntry>, Error> {
+        let (sender, receiver) = mpsc::channel();
+
+        match self.add_channel_subscriber(stream_key, sender.clone()) {
+            Ok(sub_id) => {
+                // 0 will block indefinitely
+                if block.unwrap_or(0) > 0 {
+                    let closer = sender.clone();
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_millis(block.unwrap_or(0)));
+                        let _ = closer.send(Event::CloseListener(sub_id));
+                    });
+                }
+
+                while let Ok(event) = receiver.recv() {
+                    match event {
+                        Event::PushedToStream(key, (id, seq)) => {
+                            if key != stream_key {
+                                continue;
+                            }
+
+                            let take_entry = if let Some((eid, eseq)) = entry_id {
+                                id > eid || (eid == id && seq >= eseq)
+                            } else {
+                                true
+                            };
+
+                            // it no entry was given, take the pushed one
+                            let stream_entry_id = if let Some((eid, eseq)) = entry_id {
+                                format!("{}-{}", eid, eseq)
+                            } else {
+                                format!("{}-{}", id, seq)
+                            };
+
+                            if take_entry
+                                && let Ok(v) = self.xrange(
+                                    stream_key,
+                                    &stream_entry_id,
+                                    "+",
+                                    count.unwrap_or(0),
+                                )
+                            {
+                                self.remove_channel_subscriber(stream_key, sub_id)?;
+                                return Ok(v);
+                            }
+                        }
+                        Event::CloseListener(id) => {
+                            if id == sub_id {
+                                self.remove_channel_subscriber(stream_key, id)?;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => return Err(Error::from(DataStoreError::LockError)),
+        }
+        Ok(None)
+    }
+
     pub fn xread(
         &self,
         options: Vec<StreamOption>,
@@ -175,67 +242,34 @@ impl DataStore {
 
         let mut results = Vec::new();
         for (stream_key, entry_from) in streams {
-            // to block on the given entry_from, increment the seq
-            let (wait_for_id, wait_for_seq_opt) = parse_entry_id_query(&entry_from, true)?;
-            let wait_for_seq = wait_for_seq_opt.unwrap_or(0) + 1;
+            // special case, block for any new entry
+            if entry_from == "$" {
+                if let Some(response) = self.xrange_wait_for(&stream_key, None, count, block)? {
+                    results.push((stream_key, Some(response)));
+                };
+                continue;
+            }
 
-            // if blocking, construct with the wait for values
+            let (wait_for_id, wait_for_seq_opt) = parse_entry_id_query(&entry_from, true)?;
             let entry_id = if block.is_some() {
-                format!("{}-{}", wait_for_id, wait_for_seq)
+                // to block from the given entry, increment the seq
+                (wait_for_id, wait_for_seq_opt.unwrap_or(0) + 1)
             } else {
-                entry_from
+                (wait_for_id, wait_for_seq_opt.unwrap_or(0))
             };
 
-            if let Ok(result) = self.xrange(&stream_key, &entry_id, "+", count.unwrap_or(0)) {
-                // if no result and block is set, wait for the result
-                if let Some(block_n) = block
-                    && (result.is_none() || result.to_owned().is_some_and(|r| r.is_empty()))
-                {
-                    let (sender, receiver) = mpsc::channel();
-                    match self.add_channel_subscriber(&stream_key, sender.clone()) {
-                        Ok(sub_id) => {
-                            // 0 will block indefinitely
-                            if block_n > 0 {
-                                let closer = sender.clone();
-                                thread::spawn(move || {
-                                    thread::sleep(std::time::Duration::from_millis(block_n));
-                                    let _ = closer.send(Event::CloseListener(sub_id));
-                                });
-                            }
+            let entry_id = (entry_id.0, entry_id.1);
+            let entry_id_str = format!("{}-{}", entry_id.0, entry_id.1);
 
-                            while let Ok(event) = receiver.recv() {
-                                match event {
-                                    Event::PushedToStream(key, (id, seq)) => {
-                                        if key != stream_key {
-                                            continue;
-                                        }
-                                        let take_entry = id >= wait_for_id
-                                            || (wait_for_id == id && seq >= wait_for_seq);
-                                        if take_entry
-                                            && let Ok(v) = self.xrange(
-                                                &stream_key,
-                                                &entry_id,
-                                                "+",
-                                                count.unwrap_or(0),
-                                            )
-                                        {
-                                            results.push((stream_key.clone(), v));
-                                            self.remove_channel_subscriber(&stream_key, sub_id)?;
-                                            break;
-                                        }
-                                    }
-                                    Event::CloseListener(id) => {
-                                        if id == sub_id {
-                                            self.remove_channel_subscriber(&stream_key, id)?;
-                                            break;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Err(_) => return Err(Error::from(DataStoreError::LockError)),
-                    }
+            if let Ok(result) = self.xrange(&stream_key, &entry_id_str, "+", count.unwrap_or(0)) {
+                // if no result and block is set, wait for the result
+                let no_result = result.is_none() || result.to_owned().is_some_and(|r| r.is_empty());
+                if block.is_some()
+                    && no_result
+                    && let Some(response) =
+                        self.xrange_wait_for(&stream_key, Some(entry_id), count, block)?
+                {
+                    results.push((stream_key, Some(response)));
                 } else {
                     results.push((stream_key, result));
                 }
@@ -723,6 +757,9 @@ fn parse_entry_id_query(
     entry_id_str: &str,
     is_start: bool,
 ) -> Result<(u128, Option<usize>), Error> {
+    if entry_id_str == "$" {
+        return Ok((0, None));
+    }
     let entry_id_str = if is_start && entry_id_str == "-" {
         "0-0"
     } else if !is_start && entry_id_str == "+" {
