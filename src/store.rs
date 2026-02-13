@@ -80,7 +80,9 @@ impl fmt::Display for DataStoreError {
         match self {
             DataStoreError::LockError => write!(f, "ERR Failed to access data"),
             DataStoreError::InvalidStreamEntryId => write!(f, "ERR Invalid stream entry ID"),
-            DataStoreError::StringNotNumber => write!(f, "ERR String failed to parse to number"),
+            DataStoreError::StringNotNumber => {
+                write!(f, "ERR value is not an integer or out of range")
+            }
             DataStoreError::UnexpectedEmptyStream => {
                 write!(f, "ERR Encountered unexpected empty stream")
             }
