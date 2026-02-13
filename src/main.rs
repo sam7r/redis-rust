@@ -104,6 +104,21 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, err.to_string().as_str());
             }
         },
+        Command::Incr(key) => match store.incr(&key) {
+            Ok(result) => {
+                if let Some(n) = result {
+                    write_to_stream(
+                        stream,
+                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
+                    );
+                } else {
+                    write_error_to_stream(stream, "not a string");
+                }
+            }
+            Err(err) => {
+                write_error_to_stream(stream, err.to_string().as_str());
+            }
+        },
         Command::Rpush(key, list) => match store.push(&key, list, false) {
             Ok(result) => {
                 if let Some(n) = result {

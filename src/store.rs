@@ -68,6 +68,7 @@ impl fmt::Display for Error {
 
 pub enum DataStoreError {
     LockError,
+    StringNotNumber,
     InvalidStreamEntryId,
     StreamEntryIdMustBeGreaterThan(String),
     StreamEntryIdLessThanLastEntry,
@@ -77,10 +78,11 @@ pub enum DataStoreError {
 impl fmt::Display for DataStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DataStoreError::LockError => write!(f, "Lock error"),
-            DataStoreError::InvalidStreamEntryId => write!(f, "Invalid stream entry ID"),
+            DataStoreError::LockError => write!(f, "ERR Failed to access data"),
+            DataStoreError::InvalidStreamEntryId => write!(f, "ERR Invalid stream entry ID"),
+            DataStoreError::StringNotNumber => write!(f, "ERR String failed to parse to number"),
             DataStoreError::UnexpectedEmptyStream => {
-                write!(f, "encountered unexpected empty stream")
+                write!(f, "ERR Encountered unexpected empty stream")
             }
             DataStoreError::StreamEntryIdLessThanLastEntry => {
                 write!(
@@ -192,6 +194,7 @@ impl DataStore {
             };
 
             let entry_id_str = format!("{}-{}", entry_id.0, entry_id.1);
+
             if let Ok(result) = self.xrange(&stream_key, &entry_id_str, "+", count.unwrap_or(0)) {
                 let no_result = result.is_none() || result.to_owned().is_some_and(|r| r.is_empty());
                 // if no result and block is set, wait for the result
@@ -301,12 +304,35 @@ impl DataStore {
 
     pub fn get(&self, key: &str) -> Result<Option<String>, Error> {
         let data = self.data.read()?;
-        let value = data.get(key).cloned();
+        let value = data.get(key);
 
         if let Some(v) = value {
             match v {
-                Value::String(result) => return Ok(Some(result)),
-                _ => return Ok(None), // Key exists but is not a string
+                Value::String(result) => return Ok(Some(String::from(result))),
+                _ => return Ok(None),
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn incr(&self, key: &str) -> Result<Option<i64>, Error> {
+        let mut data = self.data.write()?;
+        let value = data.get(key);
+
+        if let Some(v) = value {
+            match v {
+                Value::String(result) => match result.parse::<i64>() {
+                    Ok(v) => {
+                        let value = v + 1;
+                        data.insert(String::from(key), Value::String(value.to_string()));
+                        return Ok(Some(value));
+                    }
+                    Err(_) => {
+                        return Err(Error::from(DataStoreError::StringNotNumber));
+                    }
+                },
+                _ => return Ok(None),
             }
         }
 
@@ -749,13 +775,6 @@ fn value_type_as_str<'a>(v: &Value) -> &'a str {
         Value::String(_) => "string",
         Value::Stream(_) => "stream",
     }
-}
-
-#[allow(dead_code)]
-enum EntryIdQuery {
-    Full((u128, usize)),
-    Millis(u128),
-    FromNext,
 }
 
 fn parse_entry_id_query(

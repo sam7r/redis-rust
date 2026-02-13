@@ -9,6 +9,7 @@ pub enum Command {
     // string
     Set(StringKey, String, Vec<SetOption>),
     Get(StringKey),
+    Incr(StringKey),
     // list
     Rpush(StringKey, Vec<String>),
     Lpush(StringKey, Vec<String>),
@@ -81,6 +82,13 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                 "GET" => {
                     if command_parts.len() >= 2 {
                         Some(Command::Get(StringKey::from(command_parts[1])))
+                    } else {
+                        None
+                    }
+                }
+                "INCR" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Incr(StringKey::from(command_parts[1])))
                     } else {
                         None
                     }
