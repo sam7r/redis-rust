@@ -180,15 +180,15 @@ impl DataStore {
                                 continue;
                             }
 
-                            let take_entry = if let Some((eid, eseq)) = entry_id {
-                                id > eid || (eid == id && seq >= eseq)
+                            let take_entry = if let Some((wf_id, wf_seq)) = entry_id {
+                                id > wf_id || (wf_id == id && seq >= wf_seq)
                             } else {
                                 true
                             };
 
-                            // it no entry was given, take the pushed one
-                            let stream_entry_id = if let Some((eid, eseq)) = entry_id {
-                                format!("{}-{}", eid, eseq)
+                            // if no entry id is provided, take the pushed
+                            let stream_entry_id = if let Some((wf_id, wf_seq)) = entry_id {
+                                format!("{}-{}", wf_id, wf_seq)
                             } else {
                                 format!("{}-{}", id, seq)
                             };
@@ -252,7 +252,7 @@ impl DataStore {
 
             let (wait_for_id, wait_for_seq_opt) = parse_entry_id_query(&entry_from, true)?;
             let entry_id = if block.is_some() {
-                // to block from the given entry, increment the seq
+                // to block on the given entry, increment the seq
                 (wait_for_id, wait_for_seq_opt.unwrap_or(0) + 1)
             } else {
                 (wait_for_id, wait_for_seq_opt.unwrap_or(0))
@@ -264,12 +264,12 @@ impl DataStore {
             if let Ok(result) = self.xrange(&stream_key, &entry_id_str, "+", count.unwrap_or(0)) {
                 // if no result and block is set, wait for the result
                 let no_result = result.is_none() || result.to_owned().is_some_and(|r| r.is_empty());
-                if block.is_some()
-                    && no_result
-                    && let Some(response) =
+                if block.is_some() && no_result {
+                    if let Some(response) =
                         self.xrange_wait_for(&stream_key, Some(entry_id), count, block)?
-                {
-                    results.push((stream_key, Some(response)));
+                    {
+                        results.push((stream_key, Some(response)));
+                    }
                 } else {
                     results.push((stream_key, result));
                 }
@@ -751,6 +751,13 @@ fn value_type_as_str<'a>(v: &Value) -> &'a str {
         Value::String(_) => "string",
         Value::Stream(_) => "stream",
     }
+}
+
+#[allow(dead_code)]
+enum EntryIdQuery {
+    Full((u128, usize)),
+    Millis(u128),
+    FromNext,
 }
 
 fn parse_entry_id_query(
