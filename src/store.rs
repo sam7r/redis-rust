@@ -319,14 +319,13 @@ impl DataStore {
     pub fn incr(&self, key: &str) -> Result<Option<i64>, Error> {
         let mut data = self.data.write()?;
         let value = data.get(key);
+        let mut incr = 1;
 
         if let Some(v) = value {
             match v {
                 Value::String(result) => match result.parse::<i64>() {
                     Ok(v) => {
-                        let value = v + 1;
-                        data.insert(String::from(key), Value::String(value.to_string()));
-                        return Ok(Some(value));
+                        incr += v;
                     }
                     Err(_) => {
                         return Err(Error::from(DataStoreError::StringNotNumber));
@@ -336,7 +335,8 @@ impl DataStore {
             }
         }
 
-        Ok(None)
+        data.insert(String::from(key), Value::String(incr.to_string()));
+        Ok(Some(incr))
     }
 
     pub fn set(
