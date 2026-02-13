@@ -304,11 +304,11 @@ impl DataStore {
 
     pub fn get(&self, key: &str) -> Result<Option<String>, Error> {
         let data = self.data.read()?;
-        let value = data.get(key);
+        let value = data.get(key).cloned();
 
         if let Some(v) = value {
             match v {
-                Value::String(result) => return Ok(Some(String::from(result))),
+                Value::String(result) => return Ok(Some(result)),
                 _ => return Ok(None),
             }
         }
