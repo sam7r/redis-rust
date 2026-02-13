@@ -21,6 +21,8 @@ pub enum Command {
     Xadd(StreamKey, StringKey, Vec<(String, String)>),
     Xrange(StreamKey, StringKey, StringKey),
     Xread(Vec<StreamOption>),
+    // transaction
+    Multi,
 }
 
 pub fn prepare_command(data: &str) -> Option<Command> {
@@ -187,6 +189,7 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                         None
                     }
                 }
+                "MULTI" => Some(Command::Multi),
                 _ => None,
             }
         }

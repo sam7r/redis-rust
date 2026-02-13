@@ -28,7 +28,13 @@ fn main() {
     }
 }
 
+enum Mode {
+    Normal,
+    Transaction,
+}
+
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
+    let mut mode = Mode::Normal;
     loop {
         let mut buffer = [0; 512];
         let bytes_read = stream.read(&mut buffer);
@@ -40,7 +46,12 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
                 let kv_store = Arc::clone(&store);
 
                 if let Some(cmd) = prepare_command(&input) {
-                    handle_command(&mut stream, kv_store, cmd);
+                    match mode {
+                        Mode::Transaction => {
+                            handle_transaction(&mut stream, kv_store, cmd, &mut mode)
+                        }
+                        Mode::Normal => handle_command(&mut stream, kv_store, cmd, &mut mode),
+                    }
                 } else {
                     write_error_to_stream(&mut stream, "unable to handle request");
                 }
@@ -53,8 +64,31 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
     }
 }
 
-fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, command: Command) {
+fn handle_transaction(
+    stream: &mut std::net::TcpStream,
+    store: Arc<DataStore>,
+    command: Command,
+    mode: &mut Mode,
+) {
     match command {
+        _ => {}
+    }
+}
+
+fn handle_command(
+    stream: &mut std::net::TcpStream,
+    store: Arc<DataStore>,
+    command: Command,
+    mode: &mut Mode,
+) {
+    match command {
+        Command::Multi => {
+            *mode = Mode::Transaction;
+            write_to_stream(
+                stream,
+                RespBuilder::new().add_simple_string("OK").as_bytes(),
+            );
+        }
         Command::Ping => {
             write_to_stream(
                 stream,
@@ -304,6 +338,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, err.to_string().as_str());
             }
         },
+        _ => {}
     }
 }
 
