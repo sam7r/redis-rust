@@ -1,6 +1,7 @@
 use super::resp::{DataType, RespParser};
 use super::store::{SetOption, StreamKey, StreamOption, StringKey};
 
+#[derive(Clone)]
 pub enum Command {
     // connection
     Ping,
@@ -23,6 +24,7 @@ pub enum Command {
     Xread(Vec<StreamOption>),
     // transaction
     Multi,
+    Exec,
 }
 
 pub fn prepare_command(data: &str) -> Option<Command> {
@@ -190,6 +192,7 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                     }
                 }
                 "MULTI" => Some(Command::Multi),
+                "EXEC" => Some(Command::Exec),
                 _ => None,
             }
         }

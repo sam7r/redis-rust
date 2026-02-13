@@ -15,7 +15,7 @@ fn main() {
     let governor = Governor::new(
         Arc::clone(&store),
         governor::Options {
-            cleanup_type: CleanupType::Scheduled(Duration::from_millis(10)),
+            cleanup_type: CleanupType::Scheduled(Duration::from_millis(5)),
         },
     );
     governor.start();
@@ -28,6 +28,7 @@ fn main() {
     }
 }
 
+#[derive(Debug)]
 enum Mode {
     Normal,
     Transaction,
@@ -35,6 +36,8 @@ enum Mode {
 
 fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
     let mut mode = Mode::Normal;
+    let mut queue: Vec<Command> = Vec::new();
+
     loop {
         let mut buffer = [0; 512];
         let bytes_read = stream.read(&mut buffer);
@@ -48,7 +51,7 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
                 if let Some(cmd) = prepare_command(&input) {
                     match mode {
                         Mode::Transaction => {
-                            handle_transaction(&mut stream, kv_store, cmd, &mut mode)
+                            handle_transaction(&mut stream, kv_store, cmd, &mut mode, &mut queue)
                         }
                         Mode::Normal => handle_command(&mut stream, kv_store, cmd, &mut mode),
                     }
@@ -69,9 +72,23 @@ fn handle_transaction(
     store: Arc<DataStore>,
     command: Command,
     mode: &mut Mode,
+    queue: &mut Vec<Command>,
 ) {
     match command {
-        _ => {}
+        Command::Exec => {
+            for cmd in queue.iter() {
+                handle_command(stream, store.clone(), cmd.clone(), mode);
+            }
+            queue.clear();
+            *mode = Mode::Normal;
+        }
+        _ => {
+            queue.push(command);
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("QUEUED");
+
+            write_to_stream(stream, resp.as_bytes());
+        }
     }
 }
 
@@ -82,6 +99,7 @@ fn handle_command(
     mode: &mut Mode,
 ) {
     match command {
+        Command::Exec => write_error_to_stream(stream, "ERR EXEC without MULTI"),
         Command::Multi => {
             *mode = Mode::Transaction;
             write_to_stream(
@@ -338,7 +356,6 @@ fn handle_command(
                 write_error_to_stream(stream, err.to_string().as_str());
             }
         },
-        _ => {}
     }
 }
 
