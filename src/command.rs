@@ -1,5 +1,5 @@
 use super::resp::{DataType, RespParser};
-use super::store::{SetOption, StreamKey, StringKey};
+use super::store::{SetOption, StreamKey, StreamOption, StringKey};
 
 pub enum Command {
     // connection
@@ -19,6 +19,7 @@ pub enum Command {
     // srteam
     Xadd(StreamKey, StringKey, Vec<(String, String)>),
     Xrange(StreamKey, StringKey, StringKey),
+    Xread(Vec<StreamOption>),
 }
 
 pub fn prepare_command(data: &str) -> Option<Command> {
@@ -170,6 +171,14 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                         None
                     }
                 }
+                "XREAD" => {
+                    if command_parts.len() >= 4 {
+                        let options = prepare_stream_options(command_parts[1..].to_vec());
+                        Some(Command::Xread(options))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }
@@ -181,6 +190,56 @@ pub fn prepare_command(data: &str) -> Option<Command> {
             None
         }
     }
+}
+
+fn prepare_stream_options(args: Vec<&str>) -> Vec<StreamOption> {
+    let mut options = Vec::new();
+    if args.is_empty() {
+        return options;
+    }
+
+    let mut iter = args.iter().peekable();
+
+    while let Some(opt) = iter.next() {
+        let upper_opt = opt.to_uppercase();
+
+        match upper_opt.as_str() {
+            "COUNT" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(n) = next_arg.parse::<usize>()
+                {
+                    options.push(StreamOption::Count(n));
+                    iter.next();
+                }
+            }
+            "BLOCK" => {
+                if let Some(next_arg) = iter.peek()
+                    && let Ok(millis) = next_arg.parse::<u128>()
+                {
+                    options.push(StreamOption::Block(millis));
+                    iter.next();
+                }
+            }
+            "STREAMS" => {
+                // STREAMS stream_key_1 stream_key_2 stream_entry_id1 stream_entry_id2
+                let mut streams: Vec<(StreamKey, StringKey)> = Vec::new();
+                let mut stream_args: Vec<&str> = Vec::new();
+                iter.to_owned().for_each(|v| stream_args.push(v));
+
+                for i in 1..=(stream_args.len() / 2) {
+                    streams.push((
+                        stream_args[i - 1].to_string(),
+                        stream_args[((stream_args.len() / 2) - 1) + i].to_string(),
+                    ));
+                }
+
+                options.push(StreamOption::Streams(streams));
+            }
+            _ => {}
+        }
+    }
+
+    options
 }
 
 fn prepare_set_options(args: Vec<&str>) -> Vec<SetOption> {

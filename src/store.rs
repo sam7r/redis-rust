@@ -11,6 +11,12 @@ use std::{
     time::SystemTime,
 };
 
+pub enum StreamOption {
+    Block(u128),
+    Count(usize),
+    Streams(Vec<(StreamKey, StringKey)>),
+}
+
 #[allow(clippy::upper_case_acronyms)]
 pub enum SetOption {
     // Only set if the key does not exist
@@ -44,11 +50,28 @@ pub enum SetOption {
     KEEPTTL,
 }
 
+pub struct Error {
+    error: DataStoreError,
+}
+
+impl Error {
+    fn from(t: DataStoreError) -> Self {
+        Error { error: t }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
 pub enum DataStoreError {
     LockError,
     InvalidStreamEntryId,
     StreamEntryIdMustBeGreaterThan(String),
     StreamEntryIdLessThanLastEntry,
+    UnexpectedEmptyStream,
 }
 
 impl fmt::Display for DataStoreError {
@@ -56,6 +79,9 @@ impl fmt::Display for DataStoreError {
         match self {
             DataStoreError::LockError => write!(f, "Lock error"),
             DataStoreError::InvalidStreamEntryId => write!(f, "Invalid stream entry ID"),
+            DataStoreError::UnexpectedEmptyStream => {
+                write!(f, "encountered unexpected empty stream")
+            }
             DataStoreError::StreamEntryIdLessThanLastEntry => {
                 write!(
                     f,
@@ -69,19 +95,15 @@ impl fmt::Display for DataStoreError {
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<StringKey, Value>>>>
-    for DataStoreError
-{
+impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<StringKey, Value>>>> for Error {
     fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<StringKey, Value>>>) -> Self {
-        DataStoreError::LockError
+        Error::from(DataStoreError::LockError)
     }
 }
 
-impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>>>>
-    for DataStoreError
-{
+impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>>>> for Error {
     fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<StringKey, Value>>>) -> Self {
-        DataStoreError::LockError
+        Error::from(DataStoreError::LockError)
     }
 }
 
@@ -109,7 +131,7 @@ impl cmp::PartialEq<String> for Value {
 #[derive(Clone)]
 pub enum Event {
     Pushed(StringKey),
-    Close(usize),
+    CloseChannel(usize),
 }
 
 type Subscribers = Vec<(usize, mpsc::Sender<Event>)>;
@@ -129,61 +151,92 @@ impl DataStore {
         }
     }
 
+    pub fn xread(
+        &self,
+        options: Vec<StreamOption>,
+    ) -> Result<Vec<(StreamKey, Option<StreamEntry>)>, Error> {
+        let mut block = 0;
+        let mut count: Option<usize> = None;
+        let mut streams: Vec<(StreamKey, StringKey)> = Vec::new();
+
+        options.into_iter().for_each(|opt| match opt {
+            StreamOption::Block(n) => {
+                block = n;
+            }
+            StreamOption::Count(c) => {
+                count = Some(c);
+            }
+            StreamOption::Streams(s) => {
+                streams = s;
+            }
+        });
+
+        let mut results = Vec::new();
+        for (stream_key, entry_id_start) in streams {
+            if let Ok(result) = self.xrange(&stream_key, &entry_id_start, "+", count.unwrap_or(0)) {
+                results.push((stream_key, result));
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn parse_entry_id_query(
+        &self,
+        entry_id_str: &str,
+        is_start: bool,
+    ) -> Result<(u128, Option<usize>), Error> {
+        let entry_id_str = if is_start && entry_id_str == "-" {
+            "0-0"
+        } else if !is_start && entry_id_str == "+" {
+            &format!("{}-{}", u128::MAX, usize::MAX)
+        } else {
+            entry_id_str
+        };
+        let entry_id_str_split: Vec<&str> = entry_id_str.split("-").collect();
+
+        if entry_id_str_split.is_empty() {
+            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+        }
+        let Ok(entry_id_millis) = entry_id_str_split[0].parse::<u128>() else {
+            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+        };
+        if entry_id_str_split.len() > 1 {
+            let Ok(entry_id_seq) = entry_id_str_split[1].parse::<usize>() else {
+                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+            };
+            Ok((entry_id_millis, Some(entry_id_seq)))
+        } else {
+            Ok((entry_id_millis, None))
+        }
+    }
+
     pub fn xrange(
         &self,
         key: &str,
         entry_id_start_str: &str,
         entry_id_stop_str: &str,
-    ) -> Result<Option<StreamEntry>, DataStoreError> {
-        let mut entry_id_start_str = entry_id_start_str;
-        if entry_id_start_str == "-" {
-            entry_id_start_str = "0-0";
-        }
-        let entry_id_stop_str = if entry_id_stop_str == "+" {
-            &format!("{}-{}", u128::MAX, usize::MAX)
-        } else {
-            entry_id_stop_str
-        };
+        limit: usize,
+    ) -> Result<Option<StreamEntry>, Error> {
+        let (entry_id_start_millis, entry_id_start_seq) =
+            self.parse_entry_id_query(entry_id_start_str, true)?;
 
-        let entry_id_start_str_split: Vec<&str> = entry_id_start_str.split("-").collect();
-        let entry_id_stop_str_split: Vec<&str> = entry_id_stop_str.split("-").collect();
-
-        if entry_id_start_str_split.is_empty() || entry_id_stop_str_split.is_empty() {
-            return Err(DataStoreError::InvalidStreamEntryId);
-        }
-        let Ok(entry_id_start_millis) = entry_id_start_str_split[0].parse::<u128>() else {
-            return Err(DataStoreError::InvalidStreamEntryId);
-        };
-        let Ok(entry_id_stop_millis) = entry_id_stop_str_split[0].parse::<u128>() else {
-            return Err(DataStoreError::InvalidStreamEntryId);
-        };
-
-        let mut entry_id_start_seq = 0;
-        if entry_id_start_str_split.len() > 1 {
-            let Ok(v) = entry_id_start_str_split[1].parse::<usize>() else {
-                return Err(DataStoreError::InvalidStreamEntryId);
-            };
-            entry_id_start_seq = v;
-        }
+        let (entry_id_stop_millis, entry_id_stop_seq) =
+            self.parse_entry_id_query(entry_id_stop_str, false)?;
 
         let data = self.data.read()?;
         match data.get(key) {
             Some(Value::Stream(stream)) => {
-                let mut entry_id_stop_seq;
-                entry_id_stop_seq = stream.len();
-
-                if entry_id_stop_str_split.len() > 1 {
-                    let Ok(seq) = entry_id_stop_str_split[1].parse::<usize>() else {
-                        return Err(DataStoreError::InvalidStreamEntryId);
-                    };
-                    entry_id_stop_seq = seq;
-                }
-
-                let start_entry_id = (entry_id_start_millis, entry_id_start_seq);
-                let stop_entry_id = (entry_id_stop_millis, entry_id_stop_seq);
+                let start_entry_id = (entry_id_start_millis, entry_id_start_seq.unwrap_or(0));
+                let stop_entry_id = (
+                    entry_id_stop_millis,
+                    entry_id_stop_seq.unwrap_or(stream.len()),
+                );
+                let take = if limit == 0 { usize::MAX } else { limit };
 
                 let range: StreamEntry = stream
                     .range(start_entry_id..=stop_entry_id)
+                    .take(take)
                     .map(|(&k, v)| (k, v.clone()))
                     .collect::<StreamEntry>();
 
@@ -193,78 +246,93 @@ impl DataStore {
         }
     }
 
+    fn parse_entry_id_add(&self, entry_id_str: &str) -> Result<(u128, Option<usize>), Error> {
+        if entry_id_str == "*" {
+            let entry_seq: usize = 0;
+            let entry_millis: u128 = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+
+            Ok((entry_millis, Some(entry_seq)))
+        } else {
+            let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
+            if entry_id_str_split.len() != 2 {
+                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+            }
+
+            let Some(entry_millis) = entry_id_str_split[0].parse::<u128>().ok() else {
+                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+            };
+
+            if entry_id_str_split[1] == "*" {
+                if entry_millis == 0 {
+                    return Ok((entry_millis, Some(1)));
+                } else {
+                    return Ok((entry_millis, None));
+                }
+            }
+
+            let Some(entry_seq) = entry_id_str_split[1].parse::<usize>().ok() else {
+                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+            };
+
+            if entry_millis == 0 && entry_seq == 0 {
+                return Err(Error::from(DataStoreError::StreamEntryIdMustBeGreaterThan(
+                    "0-0".to_string(),
+                )));
+            }
+
+            Ok((entry_millis, Some(entry_seq)))
+        }
+    }
+
     pub fn xadd(
         &self,
         key: &str,
         entry_id_str: &str,
         fields: Vec<(String, String)>,
-    ) -> Result<Option<String>, DataStoreError> {
-        let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
-        let mut entry_seq: usize = 0;
-        let mut entry_millis: u128 = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-
-        if entry_id_str != "*" {
-            if entry_id_str_split.len() != 2 {
-                return Err(DataStoreError::InvalidStreamEntryId);
-            }
-            match entry_id_str_split[0].parse::<u128>().ok() {
-                Some(millis) => entry_millis = millis,
-                None => return Err(DataStoreError::InvalidStreamEntryId),
-            }
-            if entry_id_str_split[1] != "*" {
-                match entry_id_str_split[1].parse::<usize>().ok() {
-                    Some(seq) => entry_seq = seq,
-                    None => return Err(DataStoreError::InvalidStreamEntryId),
-                }
-                if entry_millis == 0 && entry_seq == 0 {
-                    return Err(DataStoreError::StreamEntryIdMustBeGreaterThan(
-                        "0-0".to_string(),
-                    ));
-                }
-            } else if entry_millis == 0 {
-                entry_seq = 1; // if we're given 0-*, avoid 0-0 entry id
-            }
-        }
-
+    ) -> Result<Option<String>, Error> {
+        let (entry_millis, entry_seq_opt) = self.parse_entry_id_add(entry_id_str)?;
         let mut data = self.data.write()?;
-        if let Some(value) = data.get(key).cloned() {
-            match value {
-                Value::Stream(mut stream) => {
-                    // get the last entry, check millis is greater or equal to the new entry
-                    if let Some((last_entry_id, _)) = stream.iter().next_back() {
-                        if entry_millis < last_entry_id.0 {
-                            return Err(DataStoreError::StreamEntryIdLessThanLastEntry);
-                        }
-                        if entry_millis == last_entry_id.0 {
-                            // if given a wildcard for sequence and the millis is the same, increment
-                            if entry_id_str_split.len() > 1 && entry_id_str_split[1] == "*" {
-                                entry_seq = last_entry_id.1 + 1;
-                            } else if entry_seq <= last_entry_id.1 {
-                                return Err(DataStoreError::StreamEntryIdLessThanLastEntry);
-                            }
-                        }
-                    }
 
-                    stream.insert((entry_millis, entry_seq), fields);
-                    data.insert(String::from(key), Value::Stream(stream));
-
-                    Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
-                }
-                _ => Ok(None),
-            }
-        } else {
+        let Some(value) = data.get(key).cloned() else {
+            let entry_seq = entry_seq_opt.unwrap_or(0);
             let mut stream = BTreeMap::new();
+
             stream.insert((entry_millis, entry_seq), fields);
             data.insert(String::from(key), Value::Stream(stream));
 
-            Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
+            return Ok(Some(format!("{}-{}", entry_millis, entry_seq)));
+        };
+
+        match value {
+            Value::Stream(mut stream) => {
+                let Some((last_entry_id, _)) = stream.iter().next_back() else {
+                    return Err(Error::from(DataStoreError::UnexpectedEmptyStream));
+                };
+                if entry_millis < last_entry_id.0 {
+                    return Err(Error::from(DataStoreError::StreamEntryIdLessThanLastEntry));
+                }
+                let entry_seq = entry_seq_opt.unwrap_or(if entry_millis == last_entry_id.0 {
+                    last_entry_id.1 + 1
+                } else {
+                    0
+                });
+                if entry_millis == last_entry_id.0 && entry_seq <= last_entry_id.1 {
+                    return Err(Error::from(DataStoreError::StreamEntryIdLessThanLastEntry));
+                }
+
+                stream.insert((entry_millis, entry_seq), fields);
+                data.insert(String::from(key), Value::Stream(stream));
+
+                Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
+            }
+            _ => Ok(None),
         }
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+    pub fn get(&self, key: &str) -> Result<Option<String>, Error> {
         let data = self.data.read()?;
         let value = data.get(key).cloned();
 
@@ -283,7 +351,7 @@ impl DataStore {
         key: &str,
         value: String,
         _options: Vec<SetOption>,
-    ) -> Result<Option<String>, DataStoreError> {
+    ) -> Result<Option<String>, Error> {
         let mut ttl_options = Vec::new();
         let mut mod_options = Vec::new();
 
@@ -392,11 +460,7 @@ impl DataStore {
         Ok(Some("OK".to_string()))
     }
 
-    pub fn lrange(
-        &self,
-        key: &str,
-        range: (i64, i64),
-    ) -> Result<Option<Vec<String>>, DataStoreError> {
+    pub fn lrange(&self, key: &str, range: (i64, i64)) -> Result<Option<Vec<String>>, Error> {
         let data = self.data.read()?;
         if let Some(value) = data.get(key) {
             match value {
@@ -428,15 +492,20 @@ impl DataStore {
         }
     }
 
-    pub fn rpush(&self, key: &str, value: Vec<String>) -> Result<Option<usize>, DataStoreError> {
+    pub fn push(&self, key: &str, value: Vec<String>, lpush: bool) -> Result<Option<usize>, Error> {
         let mut value_list = value;
         let mut data = self.data.write()?;
 
         if let Some(existing_value) = data.get(key).cloned() {
             match existing_value {
                 Value::List(mut list) => {
-                    list.extend(value_list);
-                    value_list = list;
+                    if lpush {
+                        value_list.reverse();
+                        value_list.extend(list);
+                    } else {
+                        list.extend(value_list);
+                        value_list = list;
+                    }
                 }
                 _ => return Ok(None), // Key exists but is not a list
             };
@@ -450,29 +519,7 @@ impl DataStore {
         Ok(Some(len))
     }
 
-    pub fn lpush(&self, key: &str, value: Vec<String>) -> Result<Option<usize>, DataStoreError> {
-        let mut value_list = value;
-        value_list.reverse();
-        let mut data = self.data.write()?;
-
-        if let Some(existing_value) = data.get(key).cloned() {
-            match existing_value {
-                Value::List(list) => {
-                    value_list.extend(list);
-                }
-                _ => return Ok(None), // Key exists but is not a list
-            };
-        }
-
-        let len = value_list.len();
-        data.insert(String::from(key), Value::List(value_list));
-
-        self.publish_to_subscribers(key, Event::Pushed(String::from(key)))?;
-
-        Ok(Some(len))
-    }
-
-    pub fn llen(&self, key: StringKey) -> Result<Option<usize>, DataStoreError> {
+    pub fn llen(&self, key: StringKey) -> Result<Option<usize>, Error> {
         let data = self.data.read()?;
         if let Some(value) = data.get(&key) {
             match value {
@@ -484,7 +531,7 @@ impl DataStore {
         }
     }
 
-    pub fn lpop(&self, key: &str, count: u8) -> Result<Option<Vec<String>>, DataStoreError> {
+    pub fn lpop(&self, key: &str, count: u8) -> Result<Option<Vec<String>>, Error> {
         let mut data = self.data.write()?;
         if let Some(value) = data.get(key).cloned() {
             match value {
@@ -508,11 +555,7 @@ impl DataStore {
         }
     }
 
-    pub fn blpop(
-        &self,
-        key: &str,
-        wait_time_seconds: f32,
-    ) -> Result<Option<Vec<String>>, DataStoreError> {
+    pub fn blpop(&self, key: &str, wait_time_seconds: f32) -> Result<Option<Vec<String>>, Error> {
         if let Ok(v) = self.try_lpop_one(key)
             && let Some(value) = v
         {
@@ -527,7 +570,7 @@ impl DataStore {
                     let closer = sender.clone();
                     thread::spawn(move || {
                         thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
-                        let _ = closer.send(Event::Close(sub_id));
+                        let _ = closer.send(Event::CloseChannel(sub_id));
                     });
                 }
 
@@ -540,7 +583,7 @@ impl DataStore {
                                 return Ok(Some(vec![value]));
                             }
                         }
-                        Event::Close(id) => {
+                        Event::CloseChannel(id) => {
                             if id == sub_id {
                                 let _ = self.remove_channel_subscriber(key, id);
                                 return Ok(None);
@@ -549,13 +592,13 @@ impl DataStore {
                     }
                 }
             }
-            Err(_) => return Err(DataStoreError::LockError),
+            Err(_) => return Err(Error::from(DataStoreError::LockError)),
         }
 
         Ok(None)
     }
 
-    pub fn get_type(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+    pub fn get_type(&self, key: &str) -> Result<Option<String>, Error> {
         let data = self.data.read()?;
         match data.get(key) {
             Some(v) => Ok(Some(value_type_as_str(v).to_string())),
@@ -585,7 +628,7 @@ impl DataStore {
         });
     }
 
-    fn del(&self, key: &str) -> Result<(), DataStoreError> {
+    fn del(&self, key: &str) -> Result<(), Error> {
         {
             let mut data = self.data.write()?;
             data.remove(key);
@@ -598,7 +641,7 @@ impl DataStore {
         Ok(())
     }
 
-    fn try_lpop_one(&self, key: &str) -> Result<Option<String>, DataStoreError> {
+    fn try_lpop_one(&self, key: &str) -> Result<Option<String>, Error> {
         match self.lpop(key, 1) {
             Ok(v) => match v {
                 Some(list) => {
@@ -618,7 +661,7 @@ impl DataStore {
         &self,
         key: &str,
         subscriber: mpsc::Sender<Event>,
-    ) -> Result<usize, DataStoreError> {
+    ) -> Result<usize, Error> {
         match self.channels.write() {
             Ok(mut channels) => {
                 let id = create_subscriber_id();
@@ -628,11 +671,11 @@ impl DataStore {
                     .push((id, subscriber));
                 Ok(id)
             }
-            Err(_) => Err(DataStoreError::LockError),
+            Err(_) => Err(Error::from(DataStoreError::LockError)),
         }
     }
 
-    fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), DataStoreError> {
+    fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), Error> {
         match self.channels.write() {
             Ok(mut channels) => {
                 if let Some(subscribers) = channels.get_mut(key) {
@@ -640,11 +683,11 @@ impl DataStore {
                 }
                 Ok(())
             }
-            Err(_) => Err(DataStoreError::LockError),
+            Err(_) => Err(Error::from(DataStoreError::LockError)),
         }
     }
 
-    fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), DataStoreError> {
+    fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), Error> {
         match self.channels.read() {
             Ok(channels) => {
                 if let Some(subscribers) = channels.get(key) {
@@ -654,7 +697,7 @@ impl DataStore {
                 }
                 Ok(())
             }
-            Err(_) => Err(DataStoreError::LockError),
+            Err(_) => Err(Error::from(DataStoreError::LockError)),
         }
     }
 }

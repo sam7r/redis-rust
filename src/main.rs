@@ -104,7 +104,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, err.to_string().as_str());
             }
         },
-        Command::Rpush(key, list) => match store.rpush(&key, list) {
+        Command::Rpush(key, list) => match store.push(&key, list, false) {
             Ok(result) => {
                 if let Some(n) = result {
                     write_to_stream(
@@ -119,7 +119,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 write_error_to_stream(stream, err.to_string().as_str());
             }
         },
-        Command::Lpush(key, list) => match store.lpush(&key, list) {
+        Command::Lpush(key, list) => match store.push(&key, list, true) {
             Ok(result) => {
                 if let Some(n) = result {
                     write_to_stream(
@@ -219,7 +219,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
             }
         },
         Command::Xrange(key, entry_id_start, entry_id_stop) => {
-            match store.xrange(&key, &entry_id_start, &entry_id_stop) {
+            match store.xrange(&key, &entry_id_start, &entry_id_stop, 0) {
                 Ok(result) => {
                     if let Some(stream_range) = result {
                         let mut resp = RespBuilder::new();
@@ -243,6 +243,41 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                 }
             }
         }
+        Command::Xread(options) => match store.xread(options) {
+            Ok(result) => {
+                let mut resp = RespBuilder::new();
+                resp.add_array(&result.len());
+
+                for stream_entry in result {
+                    match stream_entry {
+                        (stream_key, Some(stream_range)) => {
+                            resp.add_array(&2);
+                            resp.add_bulk_string(&stream_key);
+                            resp.add_array(&stream_range.len());
+                            for ((entry_millis, entry_seq), items) in stream_range.iter() {
+                                resp.add_array(&2);
+                                resp.add_bulk_string(&format!("{}-{}", entry_millis, entry_seq));
+                                resp.add_array(&(items.len() * 2));
+                                for (field, value) in items {
+                                    resp.add_bulk_string(field);
+                                    resp.add_bulk_string(value);
+                                }
+                            }
+                        }
+                        (stream_key, None) => {
+                            resp.add_array(&2);
+                            resp.add_bulk_string(&stream_key);
+                            resp.negative_array();
+                        }
+                    }
+                }
+
+                write_to_stream(stream, resp.as_bytes());
+            }
+            Err(err) => {
+                write_error_to_stream(stream, err.to_string().as_str());
+            }
+        },
     }
 }
 
