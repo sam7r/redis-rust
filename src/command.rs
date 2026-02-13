@@ -214,7 +214,7 @@ fn prepare_stream_options(args: Vec<&str>) -> Vec<StreamOption> {
             }
             "BLOCK" => {
                 if let Some(next_arg) = iter.peek()
-                    && let Ok(millis) = next_arg.parse::<u128>()
+                    && let Ok(millis) = next_arg.parse::<u64>()
                 {
                     options.push(StreamOption::Block(millis));
                     iter.next();

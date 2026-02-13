@@ -12,7 +12,7 @@ use std::{
 };
 
 pub enum StreamOption {
-    Block(u128),
+    Block(u64),
     Count(usize),
     Streams(Vec<(StreamKey, StringKey)>),
 }
@@ -128,10 +128,12 @@ impl cmp::PartialEq<String> for Value {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone)]
 pub enum Event {
-    Pushed(StringKey),
-    CloseChannel(usize),
+    PushedToList(StringKey),
+    PushedToStream(StreamKey, StreamEntryId),
+    CloseListener(usize),
 }
 
 type Subscribers = Vec<(usize, mpsc::Sender<Event>)>;
@@ -155,13 +157,13 @@ impl DataStore {
         &self,
         options: Vec<StreamOption>,
     ) -> Result<Vec<(StreamKey, Option<StreamEntry>)>, Error> {
-        let mut block = 0;
+        let mut block: Option<u64> = None;
         let mut count: Option<usize> = None;
         let mut streams: Vec<(StreamKey, StringKey)> = Vec::new();
 
         options.into_iter().for_each(|opt| match opt {
             StreamOption::Block(n) => {
-                block = n;
+                block = Some(n);
             }
             StreamOption::Count(c) => {
                 count = Some(c);
@@ -172,43 +174,75 @@ impl DataStore {
         });
 
         let mut results = Vec::new();
-        for (stream_key, entry_id_start) in streams {
-            if let Ok(result) = self.xrange(&stream_key, &entry_id_start, "+", count.unwrap_or(0)) {
-                results.push((stream_key, result));
+        for (stream_key, entry_from) in streams {
+            // to block on the given entry_from, increment the seq
+            let (wait_for_id, wait_for_seq_opt) = parse_entry_id_query(&entry_from, true)?;
+            let wait_for_seq = wait_for_seq_opt.unwrap_or(0) + 1;
+
+            // if blocking, construct with the wait for values
+            let entry_id = if block.is_some() {
+                format!("{}-{}", wait_for_id, wait_for_seq)
+            } else {
+                entry_from
+            };
+
+            if let Ok(result) = self.xrange(&stream_key, &entry_id, "+", count.unwrap_or(0)) {
+                // if no result and block is set, wait for the result
+                if let Some(block_n) = block
+                    && (result.is_none() || result.to_owned().is_some_and(|r| r.is_empty()))
+                {
+                    let (sender, receiver) = mpsc::channel();
+                    match self.add_channel_subscriber(&stream_key, sender.clone()) {
+                        Ok(sub_id) => {
+                            // 0 will block indefinitely
+                            if block_n > 0 {
+                                let closer = sender.clone();
+                                thread::spawn(move || {
+                                    thread::sleep(std::time::Duration::from_millis(block_n));
+                                    let _ = closer.send(Event::CloseListener(sub_id));
+                                });
+                            }
+
+                            while let Ok(event) = receiver.recv() {
+                                match event {
+                                    Event::PushedToStream(key, (id, seq)) => {
+                                        if key != stream_key {
+                                            continue;
+                                        }
+                                        let take_entry = id >= wait_for_id
+                                            || (wait_for_id == id && seq >= wait_for_seq);
+                                        if take_entry
+                                            && let Ok(v) = self.xrange(
+                                                &stream_key,
+                                                &entry_id,
+                                                "+",
+                                                count.unwrap_or(0),
+                                            )
+                                        {
+                                            results.push((stream_key.clone(), v));
+                                            self.remove_channel_subscriber(&stream_key, sub_id)?;
+                                            break;
+                                        }
+                                    }
+                                    Event::CloseListener(id) => {
+                                        if id == sub_id {
+                                            self.remove_channel_subscriber(&stream_key, id)?;
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(_) => return Err(Error::from(DataStoreError::LockError)),
+                    }
+                } else {
+                    results.push((stream_key, result));
+                }
             }
         }
 
         Ok(results)
-    }
-
-    fn parse_entry_id_query(
-        &self,
-        entry_id_str: &str,
-        is_start: bool,
-    ) -> Result<(u128, Option<usize>), Error> {
-        let entry_id_str = if is_start && entry_id_str == "-" {
-            "0-0"
-        } else if !is_start && entry_id_str == "+" {
-            &format!("{}-{}", u128::MAX, usize::MAX)
-        } else {
-            entry_id_str
-        };
-        let entry_id_str_split: Vec<&str> = entry_id_str.split("-").collect();
-
-        if entry_id_str_split.is_empty() {
-            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-        }
-        let Ok(entry_id_millis) = entry_id_str_split[0].parse::<u128>() else {
-            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-        };
-        if entry_id_str_split.len() > 1 {
-            let Ok(entry_id_seq) = entry_id_str_split[1].parse::<usize>() else {
-                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-            };
-            Ok((entry_id_millis, Some(entry_id_seq)))
-        } else {
-            Ok((entry_id_millis, None))
-        }
     }
 
     pub fn xrange(
@@ -219,10 +253,10 @@ impl DataStore {
         limit: usize,
     ) -> Result<Option<StreamEntry>, Error> {
         let (entry_id_start_millis, entry_id_start_seq) =
-            self.parse_entry_id_query(entry_id_start_str, true)?;
+            parse_entry_id_query(entry_id_start_str, true)?;
 
         let (entry_id_stop_millis, entry_id_stop_seq) =
-            self.parse_entry_id_query(entry_id_stop_str, false)?;
+            parse_entry_id_query(entry_id_stop_str, false)?;
 
         let data = self.data.read()?;
         match data.get(key) {
@@ -246,63 +280,24 @@ impl DataStore {
         }
     }
 
-    fn parse_entry_id_add(&self, entry_id_str: &str) -> Result<(u128, Option<usize>), Error> {
-        if entry_id_str == "*" {
-            let entry_seq: usize = 0;
-            let entry_millis: u128 = SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-
-            Ok((entry_millis, Some(entry_seq)))
-        } else {
-            let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
-            if entry_id_str_split.len() != 2 {
-                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-            }
-
-            let Some(entry_millis) = entry_id_str_split[0].parse::<u128>().ok() else {
-                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-            };
-
-            if entry_id_str_split[1] == "*" {
-                if entry_millis == 0 {
-                    return Ok((entry_millis, Some(1)));
-                } else {
-                    return Ok((entry_millis, None));
-                }
-            }
-
-            let Some(entry_seq) = entry_id_str_split[1].parse::<usize>().ok() else {
-                return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-            };
-
-            if entry_millis == 0 && entry_seq == 0 {
-                return Err(Error::from(DataStoreError::StreamEntryIdMustBeGreaterThan(
-                    "0-0".to_string(),
-                )));
-            }
-
-            Ok((entry_millis, Some(entry_seq)))
-        }
-    }
-
     pub fn xadd(
         &self,
         key: &str,
         entry_id_str: &str,
         fields: Vec<(String, String)>,
     ) -> Result<Option<String>, Error> {
-        let (entry_millis, entry_seq_opt) = self.parse_entry_id_add(entry_id_str)?;
+        let (entry_millis, entry_seq_opt) = parse_entry_id_add(entry_id_str)?;
         let mut data = self.data.write()?;
 
         let Some(value) = data.get(key).cloned() else {
-            let entry_seq = entry_seq_opt.unwrap_or(0);
+            let entry_seq = entry_seq_opt.unwrap_or(if entry_millis == 0 { 1 } else { 0 });
             let mut stream = BTreeMap::new();
 
-            stream.insert((entry_millis, entry_seq), fields);
+            let entry_id = (entry_millis, entry_seq);
+            stream.insert(entry_id, fields);
             data.insert(String::from(key), Value::Stream(stream));
 
+            self.publish_to_subscribers(key, Event::PushedToStream(String::from(key), entry_id))?;
             return Ok(Some(format!("{}-{}", entry_millis, entry_seq)));
         };
 
@@ -314,18 +309,25 @@ impl DataStore {
                 if entry_millis < last_entry_id.0 {
                     return Err(Error::from(DataStoreError::StreamEntryIdLessThanLastEntry));
                 }
-                let entry_seq = entry_seq_opt.unwrap_or(if entry_millis == last_entry_id.0 {
-                    last_entry_id.1 + 1
-                } else {
-                    0
-                });
+                let entry_seq = entry_seq_opt.unwrap_or(
+                    if entry_millis == last_entry_id.0 || entry_millis == 0 {
+                        last_entry_id.1 + 1
+                    } else {
+                        0
+                    },
+                );
                 if entry_millis == last_entry_id.0 && entry_seq <= last_entry_id.1 {
                     return Err(Error::from(DataStoreError::StreamEntryIdLessThanLastEntry));
                 }
 
-                stream.insert((entry_millis, entry_seq), fields);
+                let entry_id = (entry_millis, entry_seq);
+                stream.insert(entry_id, fields);
                 data.insert(String::from(key), Value::Stream(stream));
 
+                self.publish_to_subscribers(
+                    key,
+                    Event::PushedToStream(String::from(key), entry_id),
+                )?;
                 Ok(Some(format!("{}-{}", entry_millis, entry_seq)))
             }
             _ => Ok(None),
@@ -514,7 +516,7 @@ impl DataStore {
         let len = value_list.len();
         data.insert(String::from(key), Value::List(value_list));
 
-        self.publish_to_subscribers(key, Event::Pushed(String::from(key)))?;
+        self.publish_to_subscribers(key, Event::PushedToList(String::from(key)))?;
 
         Ok(Some(len))
     }
@@ -544,7 +546,7 @@ impl DataStore {
                     let new_list = list.split_off(split_from as usize);
                     data.insert(String::from(key), Value::List(new_list));
 
-                    self.publish_to_subscribers(key, Event::Pushed(String::from(key)))?;
+                    self.publish_to_subscribers(key, Event::PushedToList(String::from(key)))?;
 
                     Ok(Some(list))
                 }
@@ -570,25 +572,27 @@ impl DataStore {
                     let closer = sender.clone();
                     thread::spawn(move || {
                         thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
-                        let _ = closer.send(Event::CloseChannel(sub_id));
+                        let _ = closer.send(Event::CloseListener(sub_id));
                     });
                 }
 
                 while let Ok(event) = receiver.recv() {
                     match event {
-                        Event::Pushed(key) => {
+                        Event::PushedToList(key) => {
                             if let Ok(v) = self.try_lpop_one(&key)
                                 && let Some(value) = v
                             {
+                                self.remove_channel_subscriber(&key, sub_id)?;
                                 return Ok(Some(vec![value]));
                             }
                         }
-                        Event::CloseChannel(id) => {
+                        Event::CloseListener(id) => {
                             if id == sub_id {
-                                let _ = self.remove_channel_subscriber(key, id);
+                                self.remove_channel_subscriber(key, id)?;
                                 return Ok(None);
                             }
                         }
+                        _ => {}
                     }
                 }
             }
@@ -712,5 +716,71 @@ fn value_type_as_str<'a>(v: &Value) -> &'a str {
         Value::List(_) => "list",
         Value::String(_) => "string",
         Value::Stream(_) => "stream",
+    }
+}
+
+fn parse_entry_id_query(
+    entry_id_str: &str,
+    is_start: bool,
+) -> Result<(u128, Option<usize>), Error> {
+    let entry_id_str = if is_start && entry_id_str == "-" {
+        "0-0"
+    } else if !is_start && entry_id_str == "+" {
+        &format!("{}-{}", u128::MAX, usize::MAX)
+    } else {
+        entry_id_str
+    };
+    let entry_id_str_split: Vec<&str> = entry_id_str.split("-").collect();
+
+    if entry_id_str_split.is_empty() {
+        return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+    }
+    let Ok(entry_id_millis) = entry_id_str_split[0].parse::<u128>() else {
+        return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+    };
+    if entry_id_str_split.len() > 1 {
+        let Ok(entry_id_seq) = entry_id_str_split[1].parse::<usize>() else {
+            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+        };
+        Ok((entry_id_millis, Some(entry_id_seq)))
+    } else {
+        Ok((entry_id_millis, None))
+    }
+}
+
+fn parse_entry_id_add(entry_id_str: &str) -> Result<(u128, Option<usize>), Error> {
+    if entry_id_str == "*" {
+        let entry_seq: usize = 0;
+        let entry_millis: u128 = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        Ok((entry_millis, Some(entry_seq)))
+    } else {
+        let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
+        if entry_id_str_split.len() != 2 {
+            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+        }
+
+        let Some(entry_millis) = entry_id_str_split[0].parse::<u128>().ok() else {
+            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+        };
+
+        if entry_id_str_split[1] == "*" {
+            return Ok((entry_millis, None));
+        }
+
+        let Some(entry_seq) = entry_id_str_split[1].parse::<usize>().ok() else {
+            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
+        };
+
+        if entry_millis == 0 && entry_seq == 0 {
+            return Err(Error::from(DataStoreError::StreamEntryIdMustBeGreaterThan(
+                "0-0".to_string(),
+            )));
+        }
+
+        Ok((entry_millis, Some(entry_seq)))
     }
 }

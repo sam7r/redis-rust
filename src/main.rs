@@ -246,28 +246,34 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
         Command::Xread(options) => match store.xread(options) {
             Ok(result) => {
                 let mut resp = RespBuilder::new();
-                resp.add_array(&result.len());
-
-                for stream_entry in result {
-                    match stream_entry {
-                        (stream_key, Some(stream_range)) => {
-                            resp.add_array(&2);
-                            resp.add_bulk_string(&stream_key);
-                            resp.add_array(&stream_range.len());
-                            for ((entry_millis, entry_seq), items) in stream_range.iter() {
+                if result.is_empty() {
+                    resp.negative_array();
+                } else {
+                    resp.add_array(&result.len());
+                    for stream_entry in result {
+                        match stream_entry {
+                            (stream_key, Some(stream_range)) => {
                                 resp.add_array(&2);
-                                resp.add_bulk_string(&format!("{}-{}", entry_millis, entry_seq));
-                                resp.add_array(&(items.len() * 2));
-                                for (field, value) in items {
-                                    resp.add_bulk_string(field);
-                                    resp.add_bulk_string(value);
+                                resp.add_bulk_string(&stream_key);
+                                resp.add_array(&stream_range.len());
+                                for ((entry_millis, entry_seq), items) in stream_range.iter() {
+                                    resp.add_array(&2);
+                                    resp.add_bulk_string(&format!(
+                                        "{}-{}",
+                                        entry_millis, entry_seq
+                                    ));
+                                    resp.add_array(&(items.len() * 2));
+                                    for (field, value) in items {
+                                        resp.add_bulk_string(field);
+                                        resp.add_bulk_string(value);
+                                    }
                                 }
                             }
-                        }
-                        (stream_key, None) => {
-                            resp.add_array(&2);
-                            resp.add_bulk_string(&stream_key);
-                            resp.negative_array();
+                            (stream_key, None) => {
+                                resp.add_array(&2);
+                                resp.add_bulk_string(&stream_key);
+                                resp.negative_array();
+                            }
                         }
                     }
                 }
