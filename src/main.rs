@@ -224,10 +224,12 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                     if let Some(stream_range) = result {
                         let mut resp = RespBuilder::new();
                         resp.add_array(&stream_range.len());
+
                         for ((entry_millis, entry_seq), items) in stream_range.iter() {
                             resp.add_array(&2);
                             resp.add_bulk_string(&format!("{}-{}", entry_millis, entry_seq));
                             resp.add_array(&(items.len() * 2));
+
                             for (field, value) in items {
                                 resp.add_bulk_string(field);
                                 resp.add_bulk_string(value);
@@ -250,12 +252,14 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                     resp.negative_array();
                 } else {
                     resp.add_array(&result.len());
+
                     for stream_entry in result {
                         match stream_entry {
                             (stream_key, Some(stream_range)) => {
                                 resp.add_array(&2);
                                 resp.add_bulk_string(&stream_key);
                                 resp.add_array(&stream_range.len());
+
                                 for ((entry_millis, entry_seq), items) in stream_range.iter() {
                                     resp.add_array(&2);
                                     resp.add_bulk_string(&format!(
@@ -263,6 +267,7 @@ fn handle_command(stream: &mut std::net::TcpStream, store: Arc<DataStore>, comma
                                         entry_millis, entry_seq
                                     ));
                                     resp.add_array(&(items.len() * 2));
+
                                     for (field, value) in items {
                                         resp.add_bulk_string(field);
                                         resp.add_bulk_string(value);
