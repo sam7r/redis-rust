@@ -1,3 +1,5 @@
+use std::fmt;
+
 pub struct RespParser<'a> {
     pub data: &'a str,
     pub cursor: usize,
@@ -40,11 +42,22 @@ pub struct RespBuilder {
     data: String,
 }
 
+impl fmt::Display for RespBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.data)
+    }
+}
+
 impl RespBuilder {
     pub fn new() -> Self {
         RespBuilder {
             data: String::new(),
         }
+    }
+
+    pub fn join(&mut self, str: &str) -> &mut Self {
+        self.data.push_str(str);
+        self
     }
 
     pub fn add_simple_string(&mut self, value: &str) -> &mut Self {

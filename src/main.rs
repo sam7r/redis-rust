@@ -51,9 +51,13 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
                 if let Some(cmd) = prepare_command(&input) {
                     match mode {
                         Mode::Transaction => {
-                            handle_transaction(&mut stream, kv_store, cmd, &mut mode, &mut queue)
+                            let resp = handle_tx(kv_store, cmd, &mut mode, &mut queue);
+                            write_to_stream(&mut stream, resp.as_bytes());
                         }
-                        Mode::Normal => handle_command(&mut stream, kv_store, cmd, &mut mode),
+                        Mode::Normal => {
+                            let resp = handle_cmd(kv_store, cmd, &mut mode);
+                            write_to_stream(&mut stream, resp.as_bytes());
+                        }
                     }
                 } else {
                     write_error_to_stream(&mut stream, "unable to handle request");
@@ -67,54 +71,55 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
     }
 }
 
-fn handle_transaction(
-    stream: &mut std::net::TcpStream,
+fn handle_tx(
     store: Arc<DataStore>,
     command: Command,
     mode: &mut Mode,
     queue: &mut Vec<Command>,
-) {
+) -> RespBuilder {
     match command {
         Command::Exec => {
+            let mut resp = RespBuilder::new();
+            resp.add_array(&queue.len());
             for cmd in queue.iter() {
-                handle_command(stream, store.clone(), cmd.clone(), mode);
+                let cmd_resp = handle_cmd(store.clone(), cmd.clone(), mode);
+                resp.join(&cmd_resp.to_string());
             }
             queue.clear();
             *mode = Mode::Normal;
+            resp
         }
         _ => {
             queue.push(command);
             let mut resp = RespBuilder::new();
             resp.add_simple_string("QUEUED");
-
-            write_to_stream(stream, resp.as_bytes());
+            resp
         }
     }
 }
 
-fn handle_command(
-    stream: &mut std::net::TcpStream,
-    store: Arc<DataStore>,
-    command: Command,
-    mode: &mut Mode,
-) {
+fn handle_cmd(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
-        Command::Exec => write_error_to_stream(stream, "ERR EXEC without MULTI"),
+        Command::Exec => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR EXEC without MULTI");
+            resp
+        }
         Command::Multi => {
             *mode = Mode::Transaction;
-            write_to_stream(
-                stream,
-                RespBuilder::new().add_simple_string("OK").as_bytes(),
-            );
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("OK");
+            resp
         }
         Command::Ping => {
-            write_to_stream(
-                stream,
-                RespBuilder::new().add_simple_string("PONG").as_bytes(),
-            );
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("PONG");
+            resp
         }
         Command::Echo(echo) => {
-            write_to_stream(stream, RespBuilder::new().add_bulk_string(&echo).as_bytes());
+            let mut resp = RespBuilder::new();
+            resp.add_bulk_string(&echo);
+            resp
         }
         Command::Type(key) => match store.get_type(&key) {
             Ok(t) => {
@@ -124,9 +129,13 @@ fn handle_command(
                 } else {
                     resp.add_simple_string("none");
                 }
-                write_to_stream(stream, resp.as_bytes());
+                resp
             }
-            Err(_) => write_error_to_stream(stream, "failed to get type"),
+            Err(_) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error("failed to get type");
+                resp
+            }
         },
         Command::Set(key, value, options) => match store.set(&key, value, options) {
             Ok(v) => {
@@ -136,10 +145,12 @@ fn handle_command(
                 } else {
                     resp.add_simple_string("OK");
                 }
-                write_to_stream(stream, resp.as_bytes());
+                resp
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Get(value) => match store.get(&value) {
@@ -150,55 +161,66 @@ fn handle_command(
                 } else {
                     resp.negative_bulk_string();
                 }
-                write_to_stream(stream, resp.as_bytes());
+                resp
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Incr(key) => match store.incr(&key) {
             Ok(result) => {
                 if let Some(n) = result {
-                    write_to_stream(
-                        stream,
-                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
-                    );
+                    let mut resp = RespBuilder::new();
+                    resp.add_integer(&n.to_string());
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a string");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a string");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Rpush(key, list) => match store.push(&key, list, false) {
             Ok(result) => {
                 if let Some(n) = result {
-                    write_to_stream(
-                        stream,
-                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
-                    );
+                    let mut resp = RespBuilder::new();
+                    resp.add_integer(&n.to_string());
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a list");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a list");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Lpush(key, list) => match store.push(&key, list, true) {
             Ok(result) => {
                 if let Some(n) = result {
-                    write_to_stream(
-                        stream,
-                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
-                    );
+                    let mut resp = RespBuilder::new();
+                    resp.add_integer(&n.to_string());
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a list");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a list");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Lrange(key, start, stop) => match store.lrange(&key, (start, stop)) {
@@ -209,28 +231,35 @@ fn handle_command(
                     list.iter().for_each(|item| {
                         resp.add_bulk_string(item);
                     });
-                    write_to_stream(stream, resp.as_bytes());
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a list");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a list");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Llen(key) => match store.llen(key) {
             Ok(result) => {
                 if let Some(n) = result {
-                    write_to_stream(
-                        stream,
-                        RespBuilder::new().add_integer(&n.to_string()).as_bytes(),
-                    );
+                    let mut resp = RespBuilder::new();
+                    resp.add_integer(&n.to_string());
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a list");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a list");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Lpop(key, count) => match store.lpop(&key, count) {
@@ -243,13 +272,17 @@ fn handle_command(
                     list.iter().for_each(|item| {
                         resp.add_bulk_string(item);
                     });
-                    write_to_stream(stream, resp.as_bytes());
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a list or empty list");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a list or empty list");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Blpop(key, timeout) => match store.blpop(&key, timeout) {
@@ -261,28 +294,36 @@ fn handle_command(
                     list.iter().for_each(|item| {
                         resp.add_bulk_string(item);
                     });
-                    write_to_stream(stream, resp.as_bytes());
+                    resp
                 }
                 None => {
                     let mut resp = RespBuilder::new();
                     resp.negative_array();
-                    write_to_stream(stream, resp.as_bytes());
+                    resp
                 }
             },
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Xadd(key, entry_id, fields) => match store.xadd(&key, &entry_id, fields) {
             Ok(result) => {
                 if let Some(id) = result {
-                    write_to_stream(stream, RespBuilder::new().add_bulk_string(&id).as_bytes());
+                    let mut resp = RespBuilder::new();
+                    resp.add_bulk_string(&id);
+                    resp
                 } else {
-                    write_error_to_stream(stream, "not a stream");
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error("not a stream");
+                    resp
                 }
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
         Command::Xrange(key, entry_id_start, entry_id_stop) => {
@@ -302,13 +343,17 @@ fn handle_command(
                                 resp.add_bulk_string(value);
                             }
                         }
-                        write_to_stream(stream, resp.as_bytes());
+                        resp
                     } else {
-                        write_error_to_stream(stream, "not a stream");
+                        let mut resp = RespBuilder::new();
+                        resp.add_simple_error("not a stream");
+                        resp
                     }
                 }
                 Err(err) => {
-                    write_error_to_stream(stream, err.to_string().as_str());
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error(err.to_string().as_str());
+                    resp
                 }
             }
         }
@@ -350,10 +395,12 @@ fn handle_command(
                     }
                 }
 
-                write_to_stream(stream, resp.as_bytes());
+                resp
             }
             Err(err) => {
-                write_error_to_stream(stream, err.to_string().as_str());
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
             }
         },
     }
