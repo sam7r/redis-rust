@@ -1,16 +1,19 @@
+use args::{Args, Opt, Value};
 use command::{Command, prepare_command};
 use governor::{CleanupType, Governor};
 use resp::RespBuilder;
-use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
+use std::{env, io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
 use store::DataStore;
 
+mod args;
 mod command;
 mod governor;
 mod resp;
 mod store;
 
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+    let config = Config::new();
+    let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     let store = Arc::new(DataStore::new());
     let governor = Governor::new(
         Arc::clone(&store),
@@ -25,6 +28,53 @@ fn main() {
         thread::spawn(move || {
             handle_client(stream.unwrap(), kv_store);
         });
+    }
+}
+
+struct Config {
+    host: String,
+    port: String,
+}
+
+impl Config {
+    fn new() -> Self {
+        let mut args = Args::new();
+        args.add(
+            Opt::new("PORT")
+                .short('p')
+                .long("port")
+                .default("6379")
+                .required(false),
+        );
+        args.add(
+            Opt::new("HOST")
+                .short('h')
+                .long("host")
+                .default("127.0.0.1")
+                .required(false),
+        );
+
+        let env_args: Vec<String> = env::args().collect();
+
+        args.build_from(env_args).unwrap_or_else(|err| {
+            eprintln!("error parsing arguments: {}", err);
+            std::process::exit(1);
+        });
+
+        let Some(Value::Single(host)) = args.get("HOST") else {
+            eprintln!("invalid host");
+            std::process::exit(1);
+        };
+
+        let Some(Value::Single(port)) = args.get("PORT") else {
+            eprintln!("invalid port number");
+            std::process::exit(1);
+        };
+
+        Config {
+            host: host.clone(),
+            port: port.clone(),
+        }
     }
 }
 

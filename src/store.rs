@@ -181,7 +181,6 @@ impl DataStore {
 
         let mut results = Vec::new();
         for (stream_key, entry_from) in streams {
-            // special case, block for any new entry
             if entry_from == "$" {
                 if let Some(response) = self.xstream_wait_for(&stream_key, None, count, block)? {
                     results.push((stream_key, Some(response)));
@@ -190,7 +189,6 @@ impl DataStore {
             }
 
             let (millis, seq_opt) = parse_entry_id_query(&entry_from, true)?;
-            // if block is set, increment the sequence number
             let entry_id = if block.is_some() {
                 (millis, seq_opt.unwrap_or(0) + 1)
             } else {
@@ -201,7 +199,6 @@ impl DataStore {
 
             if let Ok(result) = self.xrange(&stream_key, &entry_id_str, "+", count.unwrap_or(0)) {
                 let no_result = result.is_none() || result.to_owned().is_some_and(|r| r.is_empty());
-                // if no result and block is set, wait for the result
                 if block.is_some() && no_result {
                     if let Some(response) =
                         self.xstream_wait_for(&stream_key, Some(entry_id), count, block)?
@@ -504,7 +501,7 @@ impl DataStore {
                         value_list = list;
                     }
                 }
-                _ => return Ok(None), // Key exists but is not a list
+                _ => return Ok(None),
             };
         }
 
@@ -521,10 +518,10 @@ impl DataStore {
         if let Some(value) = data.get(&key) {
             match value {
                 Value::List(list) => Ok(Some(list.len())),
-                _ => Ok(None), // Key exists but is not a list
+                _ => Ok(None),
             }
         } else {
-            Ok(Some(0)) // Key does not exist, treat as empty list
+            Ok(Some(0))
         }
     }
 
@@ -545,10 +542,10 @@ impl DataStore {
 
                     Ok(Some(list))
                 }
-                _ => Ok(None), // Key exists but is not a list
+                _ => Ok(None),
             }
         } else {
-            Ok(None) // Key does not exist
+            Ok(None)
         }
     }
 
