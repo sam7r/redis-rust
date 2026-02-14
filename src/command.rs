@@ -25,6 +25,7 @@ pub enum Command {
     // transaction
     Multi,
     Exec,
+    Discard,
 }
 
 pub fn prepare_command(data: &str) -> Option<Command> {
@@ -193,6 +194,7 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                 }
                 "MULTI" => Some(Command::Multi),
                 "EXEC" => Some(Command::Exec),
+                "DISCARD" => Some(Command::Discard),
                 _ => None,
             }
         }

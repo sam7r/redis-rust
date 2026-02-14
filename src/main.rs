@@ -78,6 +78,13 @@ fn handle_tx(
     queue: &mut Vec<Command>,
 ) -> RespBuilder {
     match command {
+        Command::Discard => {
+            queue.clear();
+            *mode = Mode::Normal;
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("OK");
+            resp
+        }
         Command::Exec => {
             let mut resp = RespBuilder::new();
             resp.add_array(&queue.len());
@@ -100,6 +107,11 @@ fn handle_tx(
 
 fn handle_cmd(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::Discard => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR DISCARD without MULTI");
+            resp
+        }
         Command::Exec => {
             let mut resp = RespBuilder::new();
             resp.add_simple_error("ERR EXEC without MULTI");
