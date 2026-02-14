@@ -11,14 +11,14 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum StreamOption {
     Block(u64),
     Count(usize),
     Streams(Vec<(StreamKey, StringKey)>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum SetOption {
     // Only set if the key does not exist

@@ -15,6 +15,13 @@ fn main() {
     let config = Config::new();
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     println!("Server listening on {}:{}", config.host, config.port);
+    println!(
+        "Running in mode {}",
+        match config.replica_of {
+            Some(Value::Single(ref addr)) => format!("slave (replica of {})", addr),
+            _ => "master".to_string(),
+        }
+    );
 
     let gov_options = governor::Options {
         role: match config.replica_of {
@@ -25,8 +32,16 @@ fn main() {
     };
 
     let store = Arc::new(DataStore::new());
-    let governor = Governor::new(Arc::clone(&store), gov_options);
+    let mut governor = Governor::new(Arc::clone(&store), gov_options);
     governor.start();
+
+    if let Some(Value::Single(master_addr)) = config.replica_of {
+        println!("Attempting to replicate from master at {}", master_addr);
+        match governor.start_replication(&master_addr) {
+            Ok(_) => println!("Replication started successfully"),
+            Err(err) => eprintln!("Failed to start replication: {}", err),
+        }
+    }
 
     let store_gov = Arc::new(governor);
 

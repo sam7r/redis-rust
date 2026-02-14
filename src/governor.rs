@@ -1,6 +1,10 @@
+use super::resp::RespBuilder;
 use super::store::{DataStore, Event};
 use rand::{RngExt, distr::Alphanumeric};
 use std::{
+    error, fmt,
+    io::{Read, Write},
+    net::TcpStream,
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -61,15 +65,18 @@ pub enum Info {
     Keyspace,
 }
 
-pub struct Error {
+#[derive(Debug)]
+pub struct GovError {
     message: String,
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl fmt::Display for GovError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.message)
     }
 }
+
+impl error::Error for GovError {}
 
 impl Governor {
     pub fn new(datastore: Arc<DataStore>, options: Options) -> Self {
@@ -82,7 +89,7 @@ impl Governor {
         }
     }
 
-    pub fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, Error> {
+    pub fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
         let mut result = Vec::new();
         for opt in options {
             match opt {
@@ -118,7 +125,7 @@ impl Governor {
         info
     }
 
-    pub fn start(&self) {
+    pub fn start(&mut self) {
         match self.cleanup_type {
             CleanupType::Scheduled(interval) => {
                 let store = Arc::clone(&self.datastore);
@@ -181,6 +188,47 @@ impl Governor {
                 });
             }
         }
+    }
+
+    pub fn start_replication(
+        &mut self,
+        master_addr: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let master_addr_split = master_addr.split(' ').collect::<Vec<&str>>();
+        let master_host = master_addr_split[0];
+        let master_port = master_addr_split[1].parse::<u16>()?;
+
+        let mut stream = TcpStream::connect(format!("{}:{}", master_host, master_port))?;
+        // send ping command
+        stream.write_all(
+            RespBuilder::new()
+                .add_array(&1)
+                .add_bulk_string("PING")
+                .as_bytes(),
+        )?;
+
+        let mut buffer = [0; 512];
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                return Err(Box::new(GovError {
+                    message: "Connection closed by master".to_string(),
+                }));
+            }
+            Ok(bytes_read) => {
+                let response = String::from_utf8_lossy(&buffer[..bytes_read]);
+                if !response.starts_with("+PONG") {
+                    return Err(Box::new(GovError {
+                        message: "Unexpected response from master".to_string(),
+                    }));
+                }
+            }
+            Err(e) => {
+                return Err(Box::new(GovError {
+                    message: format!("Failed to read from master: {}", e),
+                }));
+            }
+        }
+        Ok(())
     }
 }
 

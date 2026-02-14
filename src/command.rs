@@ -2,7 +2,7 @@ use super::governor::Info;
 use super::resp::{DataType, RespParser};
 use super::store::{SetOption, StreamKey, StreamOption, StringKey};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Command {
     // server
     Ping,
