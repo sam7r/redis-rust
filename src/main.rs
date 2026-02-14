@@ -37,7 +37,7 @@ fn main() {
 
     if let Some(Value::Single(master_addr)) = config.replica_of {
         println!("Attempting to replicate from master at {}", master_addr);
-        match governor.start_replication(&master_addr) {
+        match governor.start_replication(&master_addr, &config.port) {
             Ok(_) => println!("Replication started successfully"),
             Err(err) => eprintln!("Failed to start replication: {}", err),
         }
@@ -194,6 +194,22 @@ fn handle_cmd(
     mode: &mut Mode,
 ) -> RespBuilder {
     match command {
+        Command::ReplConf(arg, value) => {
+            let mut resp = RespBuilder::new();
+            match (arg.to_uppercase().as_str(), value.to_uppercase().as_str()) {
+                ("LISTENING-PORT", port) => {
+                    governor.set_slave_listening_port(port);
+                    resp.add_simple_string("OK");
+                }
+                ("CAPA", "PSYNC2") => {
+                    resp.add_simple_string("OK");
+                }
+                _ => {
+                    resp.add_simple_error("ERR Unsupported REPLCONF option");
+                }
+            }
+            resp
+        }
         Command::Info(options) => {
             let mut resp = RespBuilder::new();
             let info = governor.get_info(options);

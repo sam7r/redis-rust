@@ -8,6 +8,7 @@ pub enum Command {
     Ping,
     Echo(String),
     Info(Vec<Info>),
+    ReplConf(String, String),
     // store
     Type(StringKey),
     // string
@@ -206,6 +207,16 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                 "MULTI" => Some(Command::Multi),
                 "EXEC" => Some(Command::Exec),
                 "DISCARD" => Some(Command::Discard),
+                "REPLCONF" => {
+                    if command_parts.len() >= 3 {
+                        Some(Command::ReplConf(
+                            command_parts[1].to_string(),
+                            command_parts[2].to_string(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }

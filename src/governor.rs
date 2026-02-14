@@ -25,6 +25,7 @@ pub struct Governor {
     cleanup_type: CleanupType,
     repl_offset: AtomicU64,
     repl_id: String,
+    slave_list: RwLock<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -86,6 +87,7 @@ impl Governor {
             cleanup_type: options.cleanup_type,
             repl_id: generate_random_id(),
             repl_offset: AtomicU64::new(0),
+            slave_list: RwLock::new(Vec::new()),
         }
     }
 
@@ -193,6 +195,7 @@ impl Governor {
     pub fn start_replication(
         &mut self,
         master_addr: &str,
+        self_port: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let master_addr_split = master_addr.split(' ').collect::<Vec<&str>>();
         let master_host = master_addr_split[0];
@@ -221,6 +224,34 @@ impl Governor {
                         message: "Unexpected response from master".to_string(),
                     }));
                 }
+                let repl_conf_messages = vec![
+                    RespBuilder::new()
+                        .add_array(&3)
+                        .add_bulk_string("REPLCONF")
+                        .add_bulk_string("listening-port")
+                        .add_bulk_string(self_port)
+                        .as_bytes()
+                        .to_vec(),
+                    RespBuilder::new()
+                        .add_array(&3)
+                        .add_bulk_string("REPLCONF")
+                        .add_bulk_string("capa")
+                        .add_bulk_string("psync2")
+                        .as_bytes()
+                        .to_vec(),
+                ];
+
+                for msg in repl_conf_messages {
+                    stream.write_all(&msg)?;
+                    let mut repl_buffer = [0; 512];
+                    let bytes_read_repl = stream.read(&mut repl_buffer)?;
+                    let response = String::from_utf8_lossy(&repl_buffer[..bytes_read_repl]);
+                    if !response.starts_with("+OK") {
+                        return Err(Box::new(GovError {
+                            message: "Unexpected response from master".to_string(),
+                        }));
+                    }
+                }
             }
             Err(e) => {
                 return Err(Box::new(GovError {
@@ -229,6 +260,11 @@ impl Governor {
             }
         }
         Ok(())
+    }
+
+    pub fn set_slave_listening_port(&self, port: &str) {
+        let mut data = self.slave_list.write().unwrap();
+        data.push(port.to_string());
     }
 }
 
