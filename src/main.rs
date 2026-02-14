@@ -1,8 +1,8 @@
 use args::{Args, Opt, Value};
 use command::{Command, prepare_command};
-use governor::{CleanupType, Governor};
+use governor::Governor;
 use resp::RespBuilder;
-use std::{env, io::Read, io::Write, net::TcpListener, sync::Arc, thread, time::Duration};
+use std::{env, io::Read, io::Write, net::TcpListener, sync::Arc, thread};
 use store::DataStore;
 
 mod args;
@@ -14,19 +14,20 @@ mod store;
 fn main() {
     let config = Config::new();
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
+    println!("Server listening on {}:{}", config.host, config.port);
+
     let store = Arc::new(DataStore::new());
-    let governor = Governor::new(
-        Arc::clone(&store),
-        governor::Options {
-            cleanup_type: CleanupType::Scheduled(Duration::from_millis(5)),
-        },
-    );
+    let governor = Governor::new(Arc::clone(&store), governor::Options::default());
     governor.start();
+    let gov = Arc::new(governor);
 
     for stream in listener.incoming() {
         let kv_store = Arc::clone(&store);
+        let store_gov = Arc::clone(&gov);
+        println!("New client connected");
+
         thread::spawn(move || {
-            handle_client(stream.unwrap(), kv_store);
+            handle_client(stream.unwrap(), kv_store, store_gov);
         });
     }
 }
@@ -84,7 +85,7 @@ enum Mode {
     Transaction,
 }
 
-fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
+fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>, governor: Arc<Governor>) {
     let mut mode = Mode::Normal;
     let mut queue: Vec<Command> = Vec::new();
 
@@ -97,15 +98,16 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
             Ok(n) => {
                 let input = String::from_utf8_lossy(&buffer[..n]);
                 let kv_store = Arc::clone(&store);
+                let store_gov = Arc::clone(&governor);
 
                 if let Some(cmd) = prepare_command(&input) {
                     match mode {
                         Mode::Transaction => {
-                            let resp = handle_tx(kv_store, cmd, &mut mode, &mut queue);
+                            let resp = handle_tx(kv_store, store_gov, cmd, &mut mode, &mut queue);
                             write_to_stream(&mut stream, resp.as_bytes());
                         }
                         Mode::Normal => {
-                            let resp = handle_cmd(kv_store, cmd, &mut mode);
+                            let resp = handle_cmd(kv_store, store_gov, cmd, &mut mode);
                             write_to_stream(&mut stream, resp.as_bytes());
                         }
                     }
@@ -123,6 +125,7 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>) {
 
 fn handle_tx(
     store: Arc<DataStore>,
+    governor: Arc<Governor>,
     command: Command,
     mode: &mut Mode,
     queue: &mut Vec<Command>,
@@ -139,7 +142,7 @@ fn handle_tx(
             let mut resp = RespBuilder::new();
             resp.add_array(&queue.len());
             for cmd in queue.iter() {
-                let cmd_resp = handle_cmd(store.clone(), cmd.clone(), mode);
+                let cmd_resp = handle_cmd(store.clone(), governor.clone(), cmd.clone(), mode);
                 resp.join(&cmd_resp.to_string());
             }
             queue.clear();
@@ -155,8 +158,33 @@ fn handle_tx(
     }
 }
 
-fn handle_cmd(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
+fn handle_cmd(
+    store: Arc<DataStore>,
+    governor: Arc<Governor>,
+    command: Command,
+    mode: &mut Mode,
+) -> RespBuilder {
     match command {
+        Command::Info(options) => {
+            let mut resp = RespBuilder::new();
+            let info = governor.get_info(options);
+            match info {
+                Ok(v) => {
+                    if v.is_empty() {
+                        resp.add_bulk_string("OK");
+                    } else {
+                        for (key, value) in v {
+                            resp.add_bulk_string(&format!("{}:{}", key, value));
+                        }
+                    }
+                }
+                Err(err) => {
+                    resp.add_simple_error(err.to_string().as_str());
+                    return resp;
+                }
+            }
+            resp
+        }
         Command::Discard => {
             let mut resp = RespBuilder::new();
             resp.add_simple_error("ERR DISCARD without MULTI");

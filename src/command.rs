@@ -1,11 +1,14 @@
+use super::governor::Info;
 use super::resp::{DataType, RespParser};
 use super::store::{SetOption, StreamKey, StreamOption, StringKey};
 
 #[derive(Clone)]
 pub enum Command {
-    // connection
+    // server
     Ping,
     Echo(String),
+    Info(Vec<Info>),
+    // store
     Type(StringKey),
     // string
     Set(StringKey, String, Vec<SetOption>),
@@ -54,6 +57,14 @@ pub fn prepare_command(data: &str) -> Option<Command> {
 
             let command_name = command_parts[0].to_uppercase();
             match command_name.as_str() {
+                "INFO" => {
+                    let mut sections: Vec<&str> = command_parts.iter().skip(1).cloned().collect();
+                    if sections.is_empty() {
+                        sections.push("default");
+                    }
+                    let info_options = prepare_info_options(sections);
+                    Some(Command::Info(info_options))
+                }
                 "PING" => Some(Command::Ping),
                 "ECHO" => {
                     if command_parts.len() >= 2 {
@@ -330,6 +341,36 @@ fn prepare_set_options(args: Vec<&str>) -> Vec<SetOption> {
                     iter.next();
                 }
             }
+            _ => {}
+        }
+    }
+
+    options
+}
+
+fn prepare_info_options(args: Vec<&str>) -> Vec<Info> {
+    let mut options = Vec::new();
+    if args.is_empty() {
+        options.push(Info::Default);
+        return options;
+    }
+
+    for arg in args {
+        let upper_arg = arg.to_uppercase();
+        match upper_arg.as_str() {
+            "DEFAULT" => options.push(Info::Default),
+            "ALL" => options.push(Info::All),
+            "EVERYTHING" => options.push(Info::Everything),
+            "SERVER" => options.push(Info::Server),
+            "CLIENTS" => options.push(Info::Clients),
+            "MEMORY" => options.push(Info::Memory),
+            "PERSISTENCE" => options.push(Info::Persistence),
+            "STATS" => options.push(Info::Stats),
+            "REPLICATION" => options.push(Info::Replication),
+            "CPU" => options.push(Info::Cpu),
+            "COMMANDSTATS" => options.push(Info::Commandstats),
+            "CLUSTER" => options.push(Info::Cluster),
+            "KEYSPACE" => options.push(Info::Keyspace),
             _ => {}
         }
     }

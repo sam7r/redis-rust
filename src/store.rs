@@ -139,6 +139,7 @@ impl cmp::PartialEq<String> for Value {
 pub enum Event {
     PushedToList(StringKey),
     PushedToStream(StreamKey, StreamEntryId),
+    ExpireUpdated(u128),
     CloseListener(usize),
 }
 
@@ -340,6 +341,15 @@ impl DataStore {
         Ok(Some(incr))
     }
 
+    fn set_expire(&self, key: &str, expire_time_millis: u128) -> Result<(), Error> {
+        self.expires
+            .write()
+            .unwrap()
+            .insert(String::from(key), expire_time_millis);
+        self.publish_to_subscribers(key, Event::ExpireUpdated(expire_time_millis))?;
+        Ok(())
+    }
+
     pub fn set(
         &self,
         key: &str,
@@ -376,16 +386,10 @@ impl DataStore {
                         .unwrap()
                         .as_millis()
                         + (seconds as u128 * 1000);
-                    self.expires
-                        .write()
-                        .unwrap()
-                        .insert(String::from(key), expire_time);
+                    self.set_expire(key, expire_time)?;
                 }
                 SetOption::EXAT(seconds) => {
-                    self.expires
-                        .write()
-                        .unwrap()
-                        .insert(String::from(key), seconds as u128 * 1000);
+                    self.set_expire(key, seconds as u128 * 1000)?;
                 }
                 SetOption::PX(milliseconds) => {
                     let expire_time = std::time::SystemTime::now()
@@ -393,17 +397,10 @@ impl DataStore {
                         .unwrap()
                         .as_millis()
                         + milliseconds;
-                    self.expires
-                        .write()
-                        .unwrap()
-                        .insert(String::from(key), expire_time);
+                    self.set_expire(key, expire_time)?;
                 }
-                SetOption::PXAT(milliseconds) => {
-                    let expire_time = milliseconds;
-                    self.expires
-                        .write()
-                        .unwrap()
-                        .insert(String::from(key), expire_time);
+                SetOption::PXAT(expire_time) => {
+                    self.set_expire(key, expire_time)?;
                 }
                 SetOption::KEEPTTL => {
                     // Do nothing, retain existing TTL
@@ -720,7 +717,7 @@ impl DataStore {
         }
     }
 
-    fn add_channel_subscriber(
+    pub fn add_channel_subscriber(
         &self,
         key: &str,
         subscriber: mpsc::Sender<Event>,
@@ -738,7 +735,7 @@ impl DataStore {
         }
     }
 
-    fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), Error> {
+    pub fn remove_channel_subscriber(&self, key: &str, id: usize) -> Result<(), Error> {
         match self.channels.write() {
             Ok(mut channels) => {
                 if let Some(subscribers) = channels.get_mut(key) {
@@ -750,10 +747,15 @@ impl DataStore {
         }
     }
 
-    fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), Error> {
+    pub fn publish_to_subscribers(&self, key: &str, event: Event) -> Result<(), Error> {
         match self.channels.read() {
             Ok(channels) => {
                 if let Some(subscribers) = channels.get(key) {
+                    for (_, subscriber) in subscribers {
+                        let _ = subscriber.send(event.clone());
+                    }
+                }
+                if let Some(subscribers) = channels.get("*") {
                     for (_, subscriber) in subscribers {
                         let _ = subscriber.send(event.clone());
                     }
