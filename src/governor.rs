@@ -5,6 +5,7 @@ use std::{
 };
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum CleanupType {
     Scheduled(time::Duration),
     Lazy,
@@ -16,12 +17,13 @@ pub struct Governor {
     cleanup_type: CleanupType,
 }
 
-#[allow(dead_code)]
+#[derive(Debug)]
 pub enum Role {
     Master,
     Slave,
 }
 
+#[derive(Debug)]
 pub struct Options {
     pub role: Role,
     pub cleanup_type: CleanupType,

@@ -9,6 +9,7 @@ pub struct Opt {
     pub required: bool,
 }
 
+#[derive(Clone)]
 pub enum Value {
     Single(String),
 }
@@ -93,8 +94,8 @@ impl Args {
         self
     }
 
-    pub fn get(&self, name: &str) -> Option<&Value> {
-        self.args.get(name)
+    pub fn get(&self, name: &str) -> Option<Value> {
+        self.args.get(name).cloned()
     }
 
     pub fn build_from(&mut self, env_args: Vec<String>) -> Result<(), Error> {

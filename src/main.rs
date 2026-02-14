@@ -16,14 +16,23 @@ fn main() {
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     println!("Server listening on {}:{}", config.host, config.port);
 
+    let gov_options = governor::Options {
+        role: match config.replica_of {
+            Some(Value::Single(_)) => governor::Role::Slave,
+            _ => governor::Role::Master,
+        },
+        ..Default::default()
+    };
+
     let store = Arc::new(DataStore::new());
-    let governor = Governor::new(Arc::clone(&store), governor::Options::default());
+    let governor = Governor::new(Arc::clone(&store), gov_options);
     governor.start();
-    let gov = Arc::new(governor);
+
+    let store_gov = Arc::new(governor);
 
     for stream in listener.incoming() {
         let kv_store = Arc::clone(&store);
-        let store_gov = Arc::clone(&gov);
+        let store_gov = Arc::clone(&store_gov);
         println!("New client connected");
 
         thread::spawn(move || {
@@ -35,6 +44,7 @@ fn main() {
 struct Config {
     host: String,
     port: String,
+    replica_of: Option<Value>,
 }
 
 impl Config {
@@ -54,6 +64,7 @@ impl Config {
                 .default("127.0.0.1")
                 .required(false),
         );
+        args.add(Opt::new("REPLICA_OF").long("replicaof").required(false));
 
         let env_args: Vec<String> = env::args().collect();
 
@@ -72,9 +83,12 @@ impl Config {
             std::process::exit(1);
         };
 
+        let replica_of = args.get("REPLICA_OF");
+
         Config {
             host: host.clone(),
             port: port.clone(),
+            replica_of,
         }
     }
 }
