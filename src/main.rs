@@ -187,9 +187,11 @@ fn handle_cmd(
                     if v.is_empty() {
                         resp.add_bulk_string("OK");
                     } else {
-                        for (key, value) in v {
-                            resp.add_bulk_string(&format!("{}:{}", key, value));
+                        let mut info_str = String::new();
+                        for (key, value) in v.iter() {
+                            info_str.push_str(&format!("{}:{}\r\n", key, value));
                         }
+                        resp.add_bulk_string(&info_str);
                     }
                 }
                 Err(err) => {

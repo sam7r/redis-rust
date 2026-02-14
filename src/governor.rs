@@ -1,6 +1,10 @@
 use super::store::{DataStore, Event};
+use rand::{RngExt, distr::Alphanumeric};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     thread, time,
 };
 
@@ -15,6 +19,8 @@ pub struct Governor {
     role: Role,
     datastore: Arc<DataStore>,
     cleanup_type: CleanupType,
+    repl_offset: AtomicU64,
+    repl_id: String,
 }
 
 #[derive(Debug)]
@@ -71,6 +77,8 @@ impl Governor {
             datastore,
             role: options.role,
             cleanup_type: options.cleanup_type,
+            repl_id: generate_random_id(),
+            repl_offset: AtomicU64::new(0),
         }
     }
 
@@ -91,13 +99,23 @@ impl Governor {
     }
 
     fn get_replication_info(&self) -> Vec<(String, String)> {
-        vec![(
+        let mut info = vec![(
             "role".to_string(),
             match self.role {
                 Role::Master => "master".to_string(),
                 Role::Slave => "slave".to_string(),
             },
-        )]
+        )];
+
+        if let Role::Master = self.role {
+            info.push(("master_replid".to_string(), self.repl_id.to_string()));
+            info.push((
+                "master_repl_offset".to_string(),
+                self.repl_offset.load(Ordering::SeqCst).to_string(),
+            ));
+        }
+
+        info
     }
 
     pub fn start(&self) {
@@ -164,4 +182,9 @@ impl Governor {
             }
         }
     }
+}
+
+fn generate_random_id() -> String {
+    let mut rng = rand::rng();
+    (0..40).map(|_| rng.sample(Alphanumeric) as char).collect()
 }

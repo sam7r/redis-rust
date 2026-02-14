@@ -5,3 +5,4 @@ authors = ["Codecrafters <hello@codecrafters.io>"]
 edition = "2024"
 
 [dependencies]
+rand = "0.10.0"
