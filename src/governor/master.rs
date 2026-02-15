@@ -6,12 +6,13 @@ use rand::{RngExt, distr::Alphanumeric};
 use std::{
     io::Write,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     thread, time,
 };
 
+use crate::command;
 use crate::governor::{
     error::GovError,
     traits::{Governor, Master},
@@ -23,7 +24,7 @@ pub struct MasterGovernor {
     repl_offset: AtomicU64,
     datastore: Arc<DataStore>,
     cleanup_type: ExpireStrategy,
-    slave_instances: RwLock<Vec<String>>,
+    slave_instances: RwLock<Vec<Arc<Mutex<std::net::TcpStream>>>>,
 }
 
 impl MasterGovernor {
@@ -83,14 +84,29 @@ impl MasterGovernor {
 }
 
 impl Master for MasterGovernor {
-    fn set_slave_listening_port(&self, port: &str) {
-        let mut data = self.slave_instances.write().unwrap();
-        data.push(port.to_string());
+    fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
+        if let Ok(mut slave_instances) = self.slave_instances.write() {
+            slave_instances.push(stream);
+        }
+    }
+
+    fn propagate_command(&self, cmd: command::Command) {
+        if should_propagate_command(cmd.clone()) {
+            self.repl_offset.fetch_add(1, Ordering::SeqCst);
+            if let Ok(slave_instances) = self.slave_instances.read() {
+                for stream in slave_instances.iter() {
+                    if let Ok(mut stream) = stream.lock() {
+                        let _ =
+                            stream.write_all(command::serialize_command(cmd.clone()).as_bytes());
+                    }
+                }
+            }
+        }
     }
 
     fn handle_psync(
         &self,
-        stream: &mut std::net::TcpStream,
+        mut stream: std::net::TcpStream,
         replication_id: &str,
         offset: i64,
     ) -> Result<Psync, Box<dyn std::error::Error>> {
@@ -117,6 +133,9 @@ impl Master for MasterGovernor {
                 // TODO: Implement incremental replication logic here
             }
         }
+
+        let stream = Arc::new(Mutex::new(stream));
+        self.set_slave_instance(stream);
 
         Ok(mode)
     }
@@ -208,4 +227,16 @@ impl Governor for MasterGovernor {
 fn generate_random_id() -> String {
     let mut rng = rand::rng();
     (0..40).map(|_| rng.sample(Alphanumeric) as char).collect()
+}
+
+fn should_propagate_command(cmd: command::Command) -> bool {
+    matches!(
+        cmd,
+        command::Command::Set(_, _, _)
+            | command::Command::Incr(_)
+            | command::Command::Rpush(_, _)
+            | command::Command::Lpush(_, _)
+            | command::Command::Lpop(_, _)
+            | command::Command::Xadd(_, _, _)
+    )
 }

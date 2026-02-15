@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use crate::governor::{
     error::GovError,
     master::MasterGovernor,
@@ -38,16 +41,23 @@ impl Master for GovernorInstance {
         }
     }
 
-    fn set_slave_listening_port(&self, port: &str) {
+    fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
         match self {
-            GovernorInstance::Master(m) => m.set_slave_listening_port(port),
+            GovernorInstance::Master(m) => m.set_slave_instance(stream),
+            GovernorInstance::Slave(_) => {}
+        }
+    }
+
+    fn propagate_command(&self, command: crate::command::Command) {
+        match self {
+            GovernorInstance::Master(m) => m.propagate_command(command),
             GovernorInstance::Slave(_) => {}
         }
     }
 
     fn handle_psync(
         &self,
-        stream: &mut std::net::TcpStream,
+        stream: std::net::TcpStream,
         replication_id: &str,
         offset: i64,
     ) -> Result<Psync, Box<dyn std::error::Error>> {

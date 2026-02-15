@@ -1,5 +1,5 @@
 use super::governor::types::Info;
-use super::resp::{DataType, RespParser};
+use super::resp::{DataType, RespBuilder, RespParser};
 use super::store::{SetOption, StreamKey, StreamOption, StringKey};
 
 #[derive(Clone, Debug)]
@@ -396,4 +396,178 @@ fn prepare_info_options(args: Vec<&str>) -> Vec<Info> {
     }
 
     options
+}
+
+pub fn serialize_command(command: Command) -> String {
+    match command {
+        Command::Ping => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("PING")
+            .to_string(),
+        Command::Echo(s) => RespBuilder::new()
+            .add_array(&2)
+            .add_bulk_string("ECHO")
+            .add_bulk_string(&s)
+            .to_string(),
+        Command::Info(_) => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("INFO")
+            .to_string(),
+        Command::ReplConf(arg, value) => RespBuilder::new()
+            .add_array(&3)
+            .add_bulk_string("REPLCONF")
+            .add_bulk_string(&arg)
+            .add_bulk_string(&value)
+            .to_string(),
+        Command::Psync(repl_id, offset) => RespBuilder::new()
+            .add_array(&3)
+            .add_bulk_string("PSYNC")
+            .add_bulk_string(&repl_id)
+            .add_bulk_string(&offset.to_string())
+            .to_string(),
+        Command::Type(key) => RespBuilder::new()
+            .add_array(&2)
+            .add_bulk_string("TYPE")
+            .add_bulk_string(&key.to_string())
+            .to_string(),
+        Command::Set(key, value, options) => {
+            let mut builder = RespBuilder::new();
+            let mut parts = vec!["SET".to_string(), key.to_string(), value];
+            for opt in options {
+                match opt {
+                    SetOption::NX => parts.push("NX".to_string()),
+                    SetOption::XX => parts.push("XX".to_string()),
+                    SetOption::IFEQ(v) => {
+                        parts.push("IFEQ".to_string());
+                        parts.push(v.clone());
+                    }
+                    SetOption::IFNE(v) => {
+                        parts.push("IFNE".to_string());
+                        parts.push(v.clone());
+                    }
+                    SetOption::IFDEQ(v) => {
+                        parts.push("IFDEQ".to_string());
+                        parts.push(v.clone());
+                    }
+                    SetOption::IFDNE(v) => {
+                        parts.push("IFDNE".to_string());
+                        parts.push(v.clone());
+                    }
+                    SetOption::GET => parts.push("GET".to_string()),
+                    SetOption::EX(v) => {
+                        parts.push("EX".to_string());
+                        parts.push(v.to_string());
+                    }
+                    SetOption::PX(v) => {
+                        parts.push("PX".to_string());
+                        parts.push(v.to_string());
+                    }
+                    SetOption::EXAT(v) => {
+                        parts.push("EXAT".to_string());
+                        parts.push(v.to_string());
+                    }
+                    SetOption::PXAT(v) => {
+                        parts.push("PXAT".to_string());
+                        parts.push(v.to_string());
+                    }
+                    SetOption::KEEPTTL => parts.push("KEEPTTL".to_string()),
+                }
+            }
+            builder.add_array(&parts.len());
+            for part in parts {
+                builder.add_bulk_string(&part);
+            }
+            builder.to_string()
+        }
+        Command::Get(key) => RespBuilder::new()
+            .add_array(&2)
+            .add_bulk_string("GET")
+            .add_bulk_string(&key.to_string())
+            .to_string(),
+        Command::Incr(key) => RespBuilder::new()
+            .add_array(&2)
+            .add_bulk_string("INCR")
+            .add_bulk_string(&key.to_string())
+            .to_string(),
+        Command::Rpush(key, values) => {
+            let mut parts = vec!["RPUSH".to_string(), key.to_string()];
+            parts.extend(values);
+            let mut builder = RespBuilder::new();
+            builder.add_array(&parts.len());
+            for part in parts {
+                builder.add_bulk_string(&part);
+            }
+            builder.to_string()
+        }
+        Command::Lpush(key, values) => {
+            let mut parts = vec!["LPUSH".to_string(), key.to_string()];
+            parts.extend(values);
+            let mut builder = RespBuilder::new();
+            builder.add_array(&parts.len());
+            for part in parts {
+                builder.add_bulk_string(&part);
+            }
+            builder.to_string()
+        }
+        Command::Lrange(key, start, stop) => RespBuilder::new()
+            .add_array(&4)
+            .add_bulk_string("LRANGE")
+            .add_bulk_string(&key.to_string())
+            .add_bulk_string(&start.to_string())
+            .add_bulk_string(&stop.to_string())
+            .to_string(),
+        Command::Llen(key) => RespBuilder::new()
+            .add_array(&2)
+            .add_bulk_string("LLEN")
+            .add_bulk_string(&key.to_string())
+            .to_string(),
+        Command::Lpop(key, count) => RespBuilder::new()
+            .add_array(&3)
+            .add_bulk_string("LPOP")
+            .add_bulk_string(&key.to_string())
+            .add_bulk_string(&count.to_string())
+            .to_string(),
+        Command::Blpop(key, timeout) => RespBuilder::new()
+            .add_array(&3)
+            .add_bulk_string("BLPOP")
+            .add_bulk_string(&key.to_string())
+            .add_bulk_string(&timeout.to_string())
+            .to_string(),
+        Command::Xadd(stream_key, key, fields) => {
+            let mut parts = vec!["XADD".to_string(), stream_key.to_string(), key.to_string()];
+            for (field, value) in fields {
+                parts.push(field);
+                parts.push(value);
+            }
+            let mut builder = RespBuilder::new();
+            builder.add_array(&parts.len());
+            for part in parts {
+                builder.add_bulk_string(&part);
+            }
+            builder.to_string()
+        }
+        Command::Xrange(start, end, count) => RespBuilder::new()
+            .add_array(&4)
+            .add_bulk_string("XRANGE")
+            .add_bulk_string(&start.to_string())
+            .add_bulk_string(&end.to_string())
+            .add_bulk_string(&count.to_string())
+            .to_string(),
+        Command::Xread(_) => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("XREAD")
+            .to_string(),
+        Command::Multi => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("MULTI")
+            .to_string(),
+        Command::Exec => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("EXEC")
+            .to_string(),
+        Command::Discard => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("DISCARD")
+            .to_string(),
+    }
 }

@@ -101,12 +101,8 @@ fn handle_client(
 
                 if let Some(cmd) = prepare_command(&input) {
                     if let Command::Psync(replication_id, offset) = cmd.clone() {
-                        if governor
-                            .handle_psync(&mut stream, &replication_id, offset)
-                            .is_err()
-                        {
-                            write_error_to_stream(&mut stream, "ERR PSYNC failed");
-                        }
+                        let _ = governor.handle_psync(stream, &replication_id, offset);
+                        break;
                     } else {
                         match mode {
                             Mode::Transaction => {
@@ -173,43 +169,55 @@ fn handle_cmd(
     command: Command,
     mode: &mut Mode,
 ) -> RespBuilder {
-    match command {
-        Command::ReplConf(arg, value) => {
-            let mut resp = RespBuilder::new();
-            match (arg.to_uppercase().as_str(), value.to_uppercase().as_str()) {
-                ("LISTENING-PORT", port) => {
-                    governor.set_slave_listening_port(port);
-                    resp.add_simple_string("OK");
-                }
-                ("CAPA", "PSYNC2") => {
-                    resp.add_simple_string("OK");
-                }
-                _ => {
-                    resp.add_simple_error("ERR Unsupported REPLCONF option");
-                }
+    if let GovernorInstance::Master(master_gov) = governor.as_ref() {
+        master_gov.propagate_command(command.clone());
+    }
+    if let Command::ReplConf(arg, value) = command {
+        let mut resp = RespBuilder::new();
+        match (arg.to_uppercase().as_str(), value.to_uppercase().as_str()) {
+            ("LISTENING-PORT", _) => {
+                resp.add_simple_string("OK");
             }
-            resp
+            ("CAPA", "PSYNC2") => {
+                resp.add_simple_string("OK");
+            }
+            _ => {
+                resp.add_simple_error("ERR Unsupported REPLCONF option");
+            }
         }
-        Command::Info(options) => {
-            let mut resp = RespBuilder::new();
-            let info = governor.get_info(options);
-            match info {
-                Ok(v) => {
-                    if v.is_empty() {
-                        resp.add_bulk_string("OK");
-                    } else {
-                        let mut info_str = String::new();
-                        for (key, value) in v.iter() {
-                            info_str.push_str(&format!("{}:{}\r\n", key, value));
-                        }
-                        resp.add_bulk_string(&info_str);
+        return resp;
+    }
+    if let Command::Info(options) = command {
+        let mut resp = RespBuilder::new();
+        let info = governor.get_info(options);
+        match info {
+            Ok(v) => {
+                if v.is_empty() {
+                    resp.add_bulk_string("OK");
+                } else {
+                    let mut info_str = String::new();
+                    for (key, value) in v.iter() {
+                        info_str.push_str(&format!("{}:{}\r\n", key, value));
                     }
-                }
-                Err(err) => {
-                    resp.add_simple_error(err.to_string().as_str());
-                    return resp;
+                    resp.add_bulk_string(&info_str);
                 }
             }
+            Err(err) => {
+                resp.add_simple_error(err.to_string().as_str());
+                return resp;
+            }
+        }
+        return resp;
+    }
+
+    perform_command(store, command, mode)
+}
+
+fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
+    match command {
+        Command::ReplConf(_, _) | Command::Info(_) => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("OK");
             resp
         }
         Command::Discard => {
