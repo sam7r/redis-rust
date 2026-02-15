@@ -1,12 +1,20 @@
-use args::{Args, Opt, Value};
+use args::Value;
 use command::{Command, prepare_command};
-use governor::Governor;
+use config::Config;
+use governor::{
+    instance::GovernorInstance,
+    master::MasterGovernor,
+    slave::SlaveGovernor,
+    traits::{Governor, Master, Slave},
+    types::{ExpireStrategy, Role},
+};
 use resp::RespBuilder;
-use std::{env, io::Read, io::Write, net::TcpListener, sync::Arc, thread};
+use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread};
 use store::DataStore;
 
 mod args;
 mod command;
+mod config;
 mod governor;
 mod resp;
 mod store;
@@ -23,32 +31,43 @@ fn main() {
         }
     );
 
-    let gov_options = governor::Options {
-        role: match config.replica_of {
-            Some(Value::Single(_)) => governor::Role::Slave,
-            _ => governor::Role::Master,
-        },
-        ..Default::default()
+    let role = match config.replica_of {
+        Some(Value::Single(_)) => Role::Slave,
+        _ => Role::Master,
     };
 
     let store = Arc::new(DataStore::new());
-    let mut governor = Governor::new(Arc::clone(&store), gov_options);
-    governor.start();
 
-    if let Some(Value::Single(master_addr)) = config.replica_of {
-        println!("Attempting to replicate from master at {}", master_addr);
-        match governor.start_replication(&master_addr, &config.port) {
-            Ok(_) => println!("Replication started successfully"),
-            Err(err) => eprintln!("Failed to start replication: {}", err),
+    let mut governor_instance = match role {
+        Role::Slave => GovernorInstance::Slave(SlaveGovernor::new(Arc::clone(&store))),
+        Role::Master => GovernorInstance::Master(MasterGovernor::new(
+            Arc::clone(&store),
+            ExpireStrategy::Lazy,
+        )),
+    };
+
+    match governor_instance {
+        GovernorInstance::Master(ref mut master_gov) => {
+            master_gov.start_store_manager();
+        }
+        GovernorInstance::Slave(ref mut slave_gov) => {
+            if let Some(Value::Single(master_addr)) = config.replica_of {
+                println!("Attempting to replicate from master at {}", master_addr);
+
+                match slave_gov.start_replication(&master_addr, &config.port) {
+                    Ok(_) => println!("Replication started successfully"),
+                    Err(err) => eprintln!("Failed to start replication: {}", err),
+                }
+            }
         }
     }
 
-    let store_gov = Arc::new(governor);
+    let gov = Arc::new(governor_instance);
 
     for stream in listener.incoming() {
-        let kv_store = Arc::clone(&store);
-        let store_gov = Arc::clone(&store_gov);
         println!("New client connected");
+        let kv_store = Arc::clone(&store);
+        let store_gov = Arc::clone(&gov);
 
         thread::spawn(move || {
             handle_client(stream.unwrap(), kv_store, store_gov);
@@ -56,65 +75,16 @@ fn main() {
     }
 }
 
-struct Config {
-    host: String,
-    port: String,
-    replica_of: Option<Value>,
-}
-
-impl Config {
-    fn new() -> Self {
-        let mut args = Args::new();
-        args.add(
-            Opt::new("PORT")
-                .short('p')
-                .long("port")
-                .default("6379")
-                .required(false),
-        );
-        args.add(
-            Opt::new("HOST")
-                .short('h')
-                .long("host")
-                .default("127.0.0.1")
-                .required(false),
-        );
-        args.add(Opt::new("REPLICA_OF").long("replicaof").required(false));
-
-        let env_args: Vec<String> = env::args().collect();
-
-        args.build_from(env_args).unwrap_or_else(|err| {
-            eprintln!("error parsing arguments: {}", err);
-            std::process::exit(1);
-        });
-
-        let Some(Value::Single(host)) = args.get("HOST") else {
-            eprintln!("invalid host");
-            std::process::exit(1);
-        };
-
-        let Some(Value::Single(port)) = args.get("PORT") else {
-            eprintln!("invalid port number");
-            std::process::exit(1);
-        };
-
-        let replica_of = args.get("REPLICA_OF");
-
-        Config {
-            host: host.clone(),
-            port: port.clone(),
-            replica_of,
-        }
-    }
-}
-
-#[derive(Debug)]
 enum Mode {
     Normal,
     Transaction,
 }
 
-fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>, governor: Arc<Governor>) {
+fn handle_client(
+    mut stream: std::net::TcpStream,
+    store: Arc<DataStore>,
+    governor: Arc<GovernorInstance>,
+) {
     let mut mode = Mode::Normal;
     let mut queue: Vec<Command> = Vec::new();
 
@@ -130,14 +100,24 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>, governo
                 let store_gov = Arc::clone(&governor);
 
                 if let Some(cmd) = prepare_command(&input) {
-                    match mode {
-                        Mode::Transaction => {
-                            let resp = handle_tx(kv_store, store_gov, cmd, &mut mode, &mut queue);
-                            write_to_stream(&mut stream, resp.as_bytes());
+                    if let Command::Psync(replication_id, offset) = cmd.clone() {
+                        if governor
+                            .handle_psync(&mut stream, &replication_id, offset)
+                            .is_err()
+                        {
+                            write_error_to_stream(&mut stream, "ERR PSYNC failed");
                         }
-                        Mode::Normal => {
-                            let resp = handle_cmd(kv_store, store_gov, cmd, &mut mode);
-                            write_to_stream(&mut stream, resp.as_bytes());
+                    } else {
+                        match mode {
+                            Mode::Transaction => {
+                                let resp =
+                                    handle_tx(kv_store, store_gov, cmd, &mut mode, &mut queue);
+                                write_to_stream(&mut stream, resp.as_bytes());
+                            }
+                            Mode::Normal => {
+                                let resp = handle_cmd(kv_store, store_gov, cmd, &mut mode);
+                                write_to_stream(&mut stream, resp.as_bytes());
+                            }
                         }
                     }
                 } else {
@@ -154,7 +134,7 @@ fn handle_client(mut stream: std::net::TcpStream, store: Arc<DataStore>, governo
 
 fn handle_tx(
     store: Arc<DataStore>,
-    governor: Arc<Governor>,
+    governor: Arc<GovernorInstance>,
     command: Command,
     mode: &mut Mode,
     queue: &mut Vec<Command>,
@@ -189,20 +169,11 @@ fn handle_tx(
 
 fn handle_cmd(
     store: Arc<DataStore>,
-    governor: Arc<Governor>,
+    governor: Arc<GovernorInstance>,
     command: Command,
     mode: &mut Mode,
 ) -> RespBuilder {
     match command {
-        Command::Psync(replication_id, offset) => {
-            let mut resp = RespBuilder::new();
-            if let Ok(response) = governor.handle_psync(&replication_id, offset) {
-                resp.add_simple_string(&response);
-            } else {
-                resp.add_simple_error("ERR PSYNC failed");
-            }
-            resp
-        }
         Command::ReplConf(arg, value) => {
             let mut resp = RespBuilder::new();
             match (arg.to_uppercase().as_str(), value.to_uppercase().as_str()) {
@@ -549,6 +520,11 @@ fn handle_cmd(
                 resp
             }
         },
+        Command::Psync(_, _) => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR PSYNC failed");
+            resp
+        }
     }
 }
 

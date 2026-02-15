@@ -1,4 +1,4 @@
-use super::governor::Info;
+use super::governor::types::Info;
 use super::resp::{DataType, RespParser};
 use super::store::{SetOption, StreamKey, StreamOption, StringKey};
 
