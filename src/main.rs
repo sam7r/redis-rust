@@ -194,6 +194,15 @@ fn handle_cmd(
     mode: &mut Mode,
 ) -> RespBuilder {
     match command {
+        Command::Psync(replication_id, offset) => {
+            let mut resp = RespBuilder::new();
+            if let Ok(response) = governor.handle_psync(&replication_id, offset) {
+                resp.add_simple_string(&response);
+            } else {
+                resp.add_simple_error("ERR PSYNC failed");
+            }
+            resp
+        }
         Command::ReplConf(arg, value) => {
             let mut resp = RespBuilder::new();
             match (arg.to_uppercase().as_str(), value.to_uppercase().as_str()) {

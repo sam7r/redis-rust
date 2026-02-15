@@ -221,7 +221,7 @@ impl Governor {
                 let response = String::from_utf8_lossy(&buffer[..bytes_read]);
                 if !response.starts_with("+PONG") {
                     return Err(Box::new(GovError {
-                        message: "Unexpected response from master".to_string(),
+                        message: "Unexpected response from master PING".to_string(),
                     }));
                 }
                 let repl_conf_messages = vec![
@@ -248,9 +248,26 @@ impl Governor {
                     let response = String::from_utf8_lossy(&repl_buffer[..bytes_read_repl]);
                     if !response.starts_with("+OK") {
                         return Err(Box::new(GovError {
-                            message: "Unexpected response from master".to_string(),
+                            message: "Unexpected response from master REPLCONF".to_string(),
                         }));
                     }
+                }
+
+                stream.write_all(
+                    RespBuilder::new()
+                        .add_array(&3)
+                        .add_bulk_string("PSYNC")
+                        .add_bulk_string("?")
+                        .add_bulk_string("-1")
+                        .as_bytes(),
+                )?;
+                let mut psync_buffer = [0; 512];
+                let bytes_read_psync = stream.read(&mut psync_buffer)?;
+                let response = String::from_utf8_lossy(&psync_buffer[..bytes_read_psync]);
+                if !response.starts_with("+FULLRESYNC") && !response.starts_with("+CONTINUE") {
+                    return Err(Box::new(GovError {
+                        message: "Unexpected response from master PSYNC".to_string(),
+                    }));
                 }
             }
             Err(e) => {
@@ -265,6 +282,24 @@ impl Governor {
     pub fn set_slave_listening_port(&self, port: &str) {
         let mut data = self.slave_list.write().unwrap();
         data.push(port.to_string());
+    }
+
+    pub fn handle_psync(&self, replication_id: &str, offset: i64) -> Result<String, GovError> {
+        if replication_id != self.repl_id {
+            return Ok(format!(
+                "FULLRESYNC {} {}",
+                self.repl_id,
+                self.repl_offset.load(Ordering::SeqCst)
+            ));
+        }
+        if offset as u64 == self.repl_offset.load(Ordering::SeqCst) {
+            return Ok("CONTINUE".to_string());
+        }
+        Ok(format!(
+            "FULLRESYNC {} {}",
+            self.repl_id,
+            self.repl_offset.load(Ordering::SeqCst)
+        ))
     }
 }
 

@@ -9,6 +9,7 @@ pub enum Command {
     Echo(String),
     Info(Vec<Info>),
     ReplConf(String, String),
+    Psync(String, i64),
     // store
     Type(StringKey),
     // string
@@ -213,6 +214,14 @@ pub fn prepare_command(data: &str) -> Option<Command> {
                             command_parts[1].to_string(),
                             command_parts[2].to_string(),
                         ))
+                    } else {
+                        None
+                    }
+                }
+                "PSYNC" => {
+                    if command_parts.len() >= 3 {
+                        let offset = command_parts[2].parse::<i64>().ok()?;
+                        Some(Command::Psync(command_parts[1].to_string(), offset))
                     } else {
                         None
                     }
