@@ -63,7 +63,6 @@ fn main() {
     }
 
     let gov = Arc::new(governor_instance);
-
     for stream in listener.incoming() {
         println!("New client connected");
         let kv_store = Arc::clone(&store);
@@ -174,6 +173,7 @@ fn handle_cmd(
     if let GovernorInstance::Master(master_gov) = governor.as_ref() {
         master_gov.propagate_command(command.clone());
     }
+
     if let Command::ReplConf(arg, value) = command {
         let mut resp = RespBuilder::new();
         match (arg.to_uppercase().as_str(), value.to_uppercase().as_str()) {
@@ -532,7 +532,7 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
         },
         Command::Psync(_, _) => {
             let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR PSYNC failed");
+            resp.add_simple_error("ERR unhandled PSYNC request");
             resp
         }
     }

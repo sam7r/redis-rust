@@ -96,8 +96,8 @@ impl Master for MasterGovernor {
             if let Ok(slave_instances) = self.slave_instances.read() {
                 for stream in slave_instances.iter() {
                     if let Ok(mut stream) = stream.lock() {
-                        let _ =
-                            stream.write_all(command::serialize_command(cmd.clone()).as_bytes());
+                        let out = command::serialize_command(cmd.clone());
+                        let _ = stream.write_all(out.as_bytes());
                     }
                 }
             }
@@ -125,10 +125,12 @@ impl Master for MasterGovernor {
                 )?;
                 let rdb_data = self.build_rdb_file();
                 let resp = format!("${}\r\n", rdb_data.len());
+                println!("Sending FULLRESYNC response: {}", resp.trim());
                 stream.write_all(resp.as_bytes())?;
                 stream.write_all(&rdb_data)?;
             }
             Psync::Continue => {
+                println!("Sending CONTINUE response");
                 stream.write_all(RespBuilder::new().add_simple_string("CONTINUE").as_bytes())?;
                 // TODO: Implement incremental replication logic here
             }
