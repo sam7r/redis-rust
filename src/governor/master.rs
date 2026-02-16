@@ -92,7 +92,7 @@ impl MasterGovernor {
 impl Master for MasterGovernor {
     fn propagate_command(&self, cmd: command::Command) {
         if should_propagate_command(cmd.clone()) {
-            self.repl_offset.fetch_add(1, Ordering::SeqCst);
+            self.repl_offset.fetch_add(0, Ordering::SeqCst);
             if let Ok(slave_instances) = self.slave_instances.read() {
                 for stream in slave_instances.iter() {
                     if let Ok(mut stream) = stream.lock() {

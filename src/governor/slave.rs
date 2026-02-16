@@ -138,9 +138,8 @@ impl SlaveGovernor {
     pub fn handle_incoming(&self, input: &str) -> Option<RespBuilder> {
         let mut mode = crate::Mode::Normal;
         let c = command::prepare_commands(input);
-        for cmd in c.iter().flatten() {
-            println!("Received command from master: {:?}", cmd);
-            if let command::Command::ReplConf(arg, _) = cmd
+        for (cmd, size) in c {
+            if let Some(command::Command::ReplConf(arg, _)) = cmd.clone()
                 && arg == "GETACK"
             {
                 let mut resp = RespBuilder::new();
@@ -148,9 +147,24 @@ impl SlaveGovernor {
                     .add_bulk_string("REPLCONF")
                     .add_bulk_string("ACK")
                     .add_bulk_string(self.repl_offset.load(Ordering::SeqCst).to_string().as_str());
+
+                let prev = self.repl_offset.fetch_add(size as u64, Ordering::SeqCst);
+                println!(
+                    "Processed command from master, updated replication offset: {} -> {}",
+                    prev,
+                    prev + size as u64
+                );
+
                 return Some(resp);
-            } else {
+            } else if let Some(cmd) = cmd.clone() {
                 let _ = crate::perform_command(self.datastore.clone(), cmd.clone(), &mut mode);
+
+                let prev = self.repl_offset.fetch_add(size as u64, Ordering::SeqCst);
+                println!(
+                    "Processed command from master, updated replication offset: {} -> {}",
+                    prev,
+                    prev + size as u64
+                );
             }
         }
         None

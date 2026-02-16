@@ -33,15 +33,16 @@ pub enum Command {
     Discard,
 }
 
-pub fn prepare_commands(data: &str) -> Vec<Option<Command>> {
+pub fn prepare_commands(data: &str) -> Vec<(Option<Command>, usize)> {
     let mut commands = Vec::new();
     let mut parser = RespParser::new(data);
+    let mut prev_cursor = 0;
+
     while parser.cursor < parser.data.len() {
-        if let Some(command) = prepare_command_with_parser(&mut parser) {
-            commands.push(Some(command));
-        } else {
-            break; // Stop if we encounter an unsupported command or data type
-        }
+        let cmd = prepare_command_with_parser(&mut parser);
+        let size = parser.cursor - prev_cursor;
+        commands.push((cmd, size));
+        prev_cursor = parser.cursor;
     }
     commands
 }
