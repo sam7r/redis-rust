@@ -81,15 +81,15 @@ impl MasterGovernor {
 
         empty_rdb
     }
-}
 
-impl Master for MasterGovernor {
-    fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
+    pub fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
         if let Ok(mut slave_instances) = self.slave_instances.write() {
             slave_instances.push(stream);
         }
     }
+}
 
+impl Master for MasterGovernor {
     fn propagate_command(&self, cmd: command::Command) {
         if should_propagate_command(cmd.clone()) {
             self.repl_offset.fetch_add(1, Ordering::SeqCst);

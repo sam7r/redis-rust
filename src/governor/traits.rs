@@ -1,8 +1,6 @@
 use crate::command;
 use std::io::{Read, Write};
 
-use std::sync::{Arc, Mutex};
-
 use crate::{
     governor::{
         error::GovError,
@@ -50,7 +48,6 @@ pub trait Governor {
 
 pub trait Master: Governor {
     fn start_store_manager(&mut self);
-    fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>);
     fn propagate_command(&self, command: command::Command);
     fn handle_psync(
         &self,
@@ -65,18 +62,5 @@ pub trait Slave: Governor {
         &mut self,
         master_addr: &str,
         self_port: &str,
-    ) -> Result<(), Box<dyn std::error::Error>>;
-
-    fn send_replconf(
-        &self,
-        stream: &mut std::net::TcpStream,
-        port: &str,
-    ) -> Result<(), Box<dyn std::error::Error>>;
-
-    fn request_psync(
-        &self,
-        stream: &mut std::net::TcpStream,
-        replication_id: Option<String>,
-        offset: i64,
     ) -> Result<(), Box<dyn std::error::Error>>;
 }

@@ -6,11 +6,13 @@ use crate::governor::{
 use crate::resp::RespBuilder;
 use crate::store::DataStore;
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     sync::{Arc, atomic::AtomicU64},
     thread,
 };
+
+use crate::command;
 
 #[allow(dead_code)]
 pub struct SlaveGovernor {
@@ -32,71 +34,8 @@ impl SlaveGovernor {
         let info = vec![("role".to_string(), "slave".to_string())];
         info
     }
-}
 
-impl Governor for SlaveGovernor {
-    fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
-        let mut result = Vec::new();
-        for opt in options {
-            match opt {
-                Info::All | Info::Default | Info::Everything => {
-                    result.extend(self.get_replication_info());
-                }
-                Info::Replication => {
-                    result.extend(self.get_replication_info());
-                }
-                _ => {}
-            }
-        }
-        Ok(result)
-    }
-}
-
-impl Slave for SlaveGovernor {
-    fn start_replication(
-        &mut self,
-        master_addr: &str,
-        self_port: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let master_addr_split = master_addr.split(' ').collect::<Vec<&str>>();
-        let master_host = master_addr_split[0];
-        let master_port = master_addr_split[1].parse::<u16>()?;
-
-        let mut stream = TcpStream::connect(format!("{}:{}", master_host, master_port))?;
-
-        self.send_ping(&mut stream)?;
-        self.send_replconf(&mut stream, self_port)?;
-        self.request_psync(&mut stream, self.master_repl_id.clone(), -1)?;
-
-        let store = Arc::clone(&self.datastore);
-        thread::spawn(move || {
-            loop {
-                let mut buffer = [0; 512];
-                let bytes_read = stream.read(&mut buffer);
-                match bytes_read {
-                    Ok(0) => {
-                        println!("Master closed the connection");
-                        break;
-                    }
-                    Ok(n) => {
-                        let cmd = String::from_utf8_lossy(&buffer[..n]);
-                        if let Some(cmd) = crate::prepare_command(&cmd) {
-                            let mut mode = crate::Mode::Normal;
-                            let _ = crate::perform_command(store.clone(), cmd, &mut mode);
-                        }
-                    }
-                    Err(e) => {
-                        println!("Error reading from master: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    fn send_replconf(
+    pub fn send_replconf(
         &self,
         stream: &mut std::net::TcpStream,
         port: &str,
@@ -132,7 +71,7 @@ impl Slave for SlaveGovernor {
         Ok(())
     }
 
-    fn request_psync(
+    fn send_psync(
         &self,
         stream: &mut std::net::TcpStream,
         replication_id: Option<String>,
@@ -150,15 +89,78 @@ impl Slave for SlaveGovernor {
                 .add_bulk_string(&offset.to_string())
                 .as_bytes(),
         )?;
-        let mut buffer = [0; 512];
-        let bytes_read = stream.read(&mut buffer)?;
-        let response = String::from_utf8_lossy(&buffer[..bytes_read]);
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        let _ = reader.read_line(&mut response)?; // Read the PSYNC response line
         if !response.starts_with("+FULLRESYNC") && !response.starts_with("+CONTINUE") {
             return Err(Box::new(GovError {
                 message: "Unexpected response from master PSYNC".to_string(),
             }));
         }
-        dbg!("Received PSYNC response: {}", response);
         Ok(())
+    }
+}
+
+impl Slave for SlaveGovernor {
+    fn start_replication(
+        &mut self,
+        master_addr: &str,
+        self_port: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let master_addr_split = master_addr.split(' ').collect::<Vec<&str>>();
+        let master_host = master_addr_split[0];
+        let master_port = master_addr_split[1].parse::<u16>()?;
+
+        let mut stream = TcpStream::connect(format!("{}:{}", master_host, master_port))?;
+        self.send_ping(&mut stream)?;
+        self.send_replconf(&mut stream, self_port)?;
+        self.send_psync(&mut stream, self.master_repl_id.clone(), -1)?;
+
+        let store = Arc::clone(&self.datastore);
+        thread::spawn(move || {
+            loop {
+                let mut buffer = [0; 512];
+                let bytes_read = stream.read(&mut buffer);
+                match bytes_read {
+                    Ok(0) => {
+                        println!("Master closed the connection");
+                        break;
+                    }
+                    Ok(n) => {
+                        let cmd = String::from_utf8_lossy(&buffer[..n]);
+
+                        for c in command::prepare_commands(&cmd).iter().flatten() {
+                            let mut mode = crate::Mode::Normal;
+                            let _ = crate::perform_command(store.clone(), c.clone(), &mut mode);
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error reading from master: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+}
+
+impl Governor for SlaveGovernor {
+    fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
+        let mut result = Vec::new();
+        for opt in options {
+            match opt {
+                Info::All | Info::Default | Info::Everything => {
+                    result.extend(self.get_replication_info());
+                }
+                Info::Replication => {
+                    result.extend(self.get_replication_info());
+                }
+                _ => {}
+            }
+        }
+        Ok(result)
     }
 }

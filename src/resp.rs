@@ -1,10 +1,5 @@
 use std::fmt;
 
-pub struct RespParser<'a> {
-    pub data: &'a str,
-    pub cursor: usize,
-}
-
 // RESP2 data types
 pub enum DataType {
     SimpleString,
@@ -114,6 +109,11 @@ impl RespBuilder {
     pub fn as_bytes(&self) -> &[u8] {
         self.data.as_bytes()
     }
+}
+
+pub struct RespParser<'a> {
+    pub data: &'a str,
+    pub cursor: usize,
 }
 
 impl<'a> RespParser<'a> {

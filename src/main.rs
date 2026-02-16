@@ -100,8 +100,10 @@ fn handle_client(
                 let store_gov = Arc::clone(&governor);
 
                 if let Some(cmd) = prepare_command(&input) {
-                    if let Command::Psync(replication_id, offset) = cmd.clone() {
-                        let _ = governor.handle_psync(stream, &replication_id, offset);
+                    if let Command::Psync(replication_id, offset) = cmd.clone()
+                        && let GovernorInstance::Master(master_gov) = governor.as_ref()
+                    {
+                        let _ = master_gov.handle_psync(stream, &replication_id, offset);
                         break;
                     } else {
                         match mode {

@@ -33,9 +33,24 @@ pub enum Command {
     Discard,
 }
 
-pub fn prepare_command(data: &str) -> Option<Command> {
+pub fn prepare_commands(data: &str) -> Vec<Option<Command>> {
+    let mut commands = Vec::new();
     let mut parser = RespParser::new(data);
+    while parser.cursor < parser.data.len() {
+        if let Some(command) = prepare_command_with_parser(&mut parser) {
+            commands.push(Some(command));
+        } else {
+            break; // Stop if we encounter an unsupported command or data type
+        }
+    }
+    commands
+}
 
+pub fn prepare_command(data: &str) -> Option<Command> {
+    prepare_command_with_parser(&mut RespParser::new(data))
+}
+
+pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
     match DataType::from_char(parser.read_char().unwrap_or('\0')) {
         DataType::Array => {
             let elements: u8 = parser.read_line()?.parse().ok()?;
@@ -569,5 +584,17 @@ pub fn serialize_command(command: Command) -> String {
             .add_array(&1)
             .add_bulk_string("DISCARD")
             .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prepares_multiple_commands() {
+        let data = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$3\r\n456\r\n*3\r\n$3\r\nSET\r\n$3\r\nbaz\r\n$3\r\n789\r\n";
+        let result = prepare_commands(data);
+        assert_eq!(result.len(), 3);
     }
 }

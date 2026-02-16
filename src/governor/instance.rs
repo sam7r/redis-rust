@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-
 use crate::governor::{
     error::GovError,
     master::MasterGovernor,
@@ -41,13 +38,6 @@ impl Master for GovernorInstance {
         }
     }
 
-    fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
-        match self {
-            GovernorInstance::Master(m) => m.set_slave_instance(stream),
-            GovernorInstance::Slave(_) => {}
-        }
-    }
-
     fn propagate_command(&self, command: crate::command::Command) {
         match self {
             GovernorInstance::Master(m) => m.propagate_command(command),
@@ -81,33 +71,6 @@ impl Slave for GovernorInstance {
                 message: "start_replication not available on master".to_string(),
             })),
             GovernorInstance::Slave(s) => s.start_replication(master_addr, self_port),
-        }
-    }
-
-    fn send_replconf(
-        &self,
-        stream: &mut std::net::TcpStream,
-        port: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match self {
-            GovernorInstance::Master(_) => Err(Box::new(GovError {
-                message: "send_replconf not available on master".to_string(),
-            })),
-            GovernorInstance::Slave(s) => s.send_replconf(stream, port),
-        }
-    }
-
-    fn request_psync(
-        &self,
-        stream: &mut std::net::TcpStream,
-        replication_id: Option<String>,
-        offset: i64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match self {
-            GovernorInstance::Master(_) => Err(Box::new(GovError {
-                message: "request_psync not available on master".to_string(),
-            })),
-            GovernorInstance::Slave(s) => s.request_psync(stream, replication_id, offset),
         }
     }
 }
