@@ -1,10 +1,14 @@
-use crate::governor::{
-    error::GovError,
-    traits::{Governor, Slave},
-    types::Info,
+use crate::{
+    command,
+    governor::{
+        error::GovError,
+        traits::{Governor, Slave},
+        types::{ExpireStrategy, Info},
+    },
+    resp::RespBuilder,
+    store::DataStore,
 };
-use crate::resp::RespBuilder;
-use crate::store::DataStore;
+
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -15,22 +19,22 @@ use std::{
     thread,
 };
 
-use crate::command;
-
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct SlaveGovernor {
     datastore: Arc<DataStore>,
     repl_offset: Arc<AtomicU64>,
     master_repl_id: Option<String>,
+    expire_strategy: ExpireStrategy,
 }
 
 impl SlaveGovernor {
-    pub fn new(datastore: Arc<DataStore>) -> Self {
+    pub fn new(datastore: Arc<DataStore>, expire_strategy: ExpireStrategy) -> Self {
         SlaveGovernor {
             datastore,
             repl_offset: Arc::new(AtomicU64::new(0)),
             master_repl_id: None,
+            expire_strategy,
         }
     }
 
@@ -217,6 +221,13 @@ impl Slave for SlaveGovernor {
 }
 
 impl Governor for SlaveGovernor {
+    fn get_datastore(&self) -> Arc<DataStore> {
+        Arc::clone(&self.datastore)
+    }
+
+    fn get_expire_strategy(&self) -> Option<ExpireStrategy> {
+        Some(self.expire_strategy)
+    }
     fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
         let mut result = Vec::new();
         for opt in options {

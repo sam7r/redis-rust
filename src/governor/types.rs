@@ -1,7 +1,7 @@
 use std::time;
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ExpireStrategy {
     Scheduled(time::Duration),
     Lazy,
@@ -11,6 +11,12 @@ pub enum ExpireStrategy {
 pub enum Role {
     Master,
     Slave,
+}
+
+#[derive(Eq, PartialEq, Clone, Copy)]
+pub enum ReplicaStatus {
+    Connected,
+    AckReceived,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

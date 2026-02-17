@@ -39,7 +39,9 @@ fn main() {
     let store = Arc::new(DataStore::new());
 
     let mut governor_instance = match role {
-        Role::Slave => GovernorInstance::Slave(SlaveGovernor::new(Arc::clone(&store))),
+        Role::Slave => {
+            GovernorInstance::Slave(SlaveGovernor::new(Arc::clone(&store), ExpireStrategy::Lazy))
+        }
         Role::Master => GovernorInstance::Master(MasterGovernor::new(
             Arc::clone(&store),
             ExpireStrategy::Lazy,
@@ -48,16 +50,16 @@ fn main() {
 
     match governor_instance {
         GovernorInstance::Master(ref mut master_gov) => {
-            master_gov.start_store_manager();
+            master_gov.start_expire_manager();
         }
         GovernorInstance::Slave(ref mut slave_gov) => {
             if let Some(Value::Single(master_addr)) = config.replica_of {
-                println!("Attempting to replicate from master at {}", master_addr);
-
+                println!("Starting replication from master at {}", master_addr);
                 match slave_gov.start_replication(&master_addr, &config.port) {
                     Ok(_) => println!("Replication started successfully"),
                     Err(err) => eprintln!("Failed to start replication: {}", err),
                 }
+                slave_gov.start_expire_manager();
             }
         }
     }
@@ -189,6 +191,25 @@ fn handle_cmd(
         }
         return resp;
     }
+
+    if let Command::Wait(repl_count, wait_time) = command {
+        let mut resp = RespBuilder::new();
+        match governor.confirm_replica_ack(repl_count, wait_time) {
+            Ok(result) => match result {
+                Some(n) => {
+                    resp.add_integer(&n.to_string());
+                }
+                None => {
+                    resp.add_integer(&0.to_string());
+                }
+            },
+            Err(err) => {
+                resp.add_simple_error(&err.to_string());
+            }
+        }
+        return resp;
+    }
+
     if let Command::Info(options) = command {
         let mut resp = RespBuilder::new();
         let info = governor.get_info(options);
@@ -217,21 +238,6 @@ fn handle_cmd(
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
-        Command::ReplConf(_, _) | Command::Info(_) => {
-            let mut resp = RespBuilder::new();
-            resp.add_simple_string("OK");
-            resp
-        }
-        Command::Discard => {
-            let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR DISCARD without MULTI");
-            resp
-        }
-        Command::Exec => {
-            let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR EXEC without MULTI");
-            resp
-        }
         Command::Multi => {
             *mode = Mode::Transaction;
             let mut resp = RespBuilder::new();
@@ -533,6 +539,26 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
         Command::Psync(_, _) => {
             let mut resp = RespBuilder::new();
             resp.add_simple_error("ERR unhandled PSYNC request");
+            resp
+        }
+        Command::Wait(_, _) => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR unhandled PSYNC request");
+            resp
+        }
+        Command::ReplConf(_, _) | Command::Info(_) => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("OK");
+            resp
+        }
+        Command::Discard => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR DISCARD without MULTI");
+            resp
+        }
+        Command::Exec => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR EXEC without MULTI");
             resp
         }
     }

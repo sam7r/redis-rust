@@ -10,6 +10,7 @@ pub enum Command {
     Info(Vec<Info>),
     ReplConf(String, String),
     Psync(String, i64),
+    Wait(u8, u64),
     // store
     Type(StringKey),
     // string
@@ -238,6 +239,15 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                     if command_parts.len() >= 3 {
                         let offset = command_parts[2].parse::<i64>().ok()?;
                         Some(Command::Psync(command_parts[1].to_string(), offset))
+                    } else {
+                        None
+                    }
+                }
+                "WAIT" => {
+                    if command_parts.len() >= 3 {
+                        let replica_count = command_parts[1].parse::<u8>().ok()?;
+                        let wait_time = command_parts[2].parse::<u64>().ok()?;
+                        Some(Command::Wait(replica_count, wait_time))
                     } else {
                         None
                     }
@@ -584,6 +594,12 @@ pub fn serialize_command(command: Command) -> String {
         Command::Discard => RespBuilder::new()
             .add_array(&1)
             .add_bulk_string("DISCARD")
+            .to_string(),
+        Command::Wait(count, wait) => RespBuilder::new()
+            .add_array(&3)
+            .add_bulk_string("WAIT")
+            .add_bulk_string(&count.to_string())
+            .add_bulk_string(&wait.to_string())
             .to_string(),
     }
 }

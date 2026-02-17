@@ -1,9 +1,12 @@
-use crate::governor::{
-    error::GovError,
-    master::MasterGovernor,
-    slave::SlaveGovernor,
-    traits::{Governor, Master, Slave},
-    types::{Info, Psync},
+use crate::{
+    governor::{
+        error::GovError,
+        master::MasterGovernor,
+        slave::SlaveGovernor,
+        traits::{Governor, Master, Slave},
+        types::{ExpireStrategy, Info, Psync},
+    },
+    store::DataStore,
 };
 
 pub enum GovernorInstance {
@@ -12,10 +15,31 @@ pub enum GovernorInstance {
 }
 
 impl Governor for GovernorInstance {
+    fn get_datastore(&self) -> std::sync::Arc<DataStore> {
+        match self {
+            GovernorInstance::Master(m) => m.get_datastore(),
+            GovernorInstance::Slave(s) => s.get_datastore(),
+        }
+    }
+
+    fn get_expire_strategy(&self) -> Option<ExpireStrategy> {
+        match self {
+            GovernorInstance::Master(m) => m.get_expire_strategy(),
+            GovernorInstance::Slave(s) => s.get_expire_strategy(),
+        }
+    }
+
     fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
         match self {
             GovernorInstance::Master(m) => m.get_info(options),
             GovernorInstance::Slave(s) => s.get_info(options),
+        }
+    }
+
+    fn start_expire_manager(&mut self) {
+        match self {
+            GovernorInstance::Master(m) => m.start_expire_manager(),
+            GovernorInstance::Slave(s) => s.start_expire_manager(),
         }
     }
 
@@ -31,10 +55,10 @@ impl Governor for GovernorInstance {
 }
 
 impl Master for GovernorInstance {
-    fn start_store_manager(&mut self) {
+    fn confirm_replica_ack(&self, repl_count: u8, wait_time: u64) -> Result<Option<u8>, GovError> {
         match self {
-            GovernorInstance::Master(m) => m.start_store_manager(),
-            GovernorInstance::Slave(_) => {}
+            GovernorInstance::Master(m) => m.confirm_replica_ack(repl_count, wait_time),
+            GovernorInstance::Slave(_) => Ok(None),
         }
     }
 

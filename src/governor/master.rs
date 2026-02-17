@@ -1,13 +1,9 @@
-use crate::{
-    resp::RespBuilder,
-    store::{DataStore, Event},
-};
 use rand::{RngExt, distr::Alphanumeric};
 use std::{
     io::Write,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread, time,
 };
@@ -16,15 +12,22 @@ use crate::command;
 use crate::governor::{
     error::GovError,
     traits::{Governor, Master},
-    types::{ExpireStrategy, Info, Psync},
+    types::{ExpireStrategy, Info, Psync, ReplicaStatus},
 };
+use crate::resp::RespBuilder;
+use crate::store::DataStore;
+
+struct Replica {
+    pub status: ReplicaStatus,
+    pub stream: Arc<Mutex<std::net::TcpStream>>,
+}
 
 pub struct MasterGovernor {
     repl_id: String,
     repl_offset: AtomicU64,
     datastore: Arc<DataStore>,
     cleanup_type: ExpireStrategy,
-    slave_instances: RwLock<Vec<Arc<Mutex<std::net::TcpStream>>>>,
+    connected_replicas: RwLock<Vec<Replica>>,
 }
 
 impl MasterGovernor {
@@ -34,7 +37,7 @@ impl MasterGovernor {
             repl_offset: AtomicU64::new(0),
             datastore,
             cleanup_type,
-            slave_instances: RwLock::new(Vec::new()),
+            connected_replicas: RwLock::new(Vec::new()),
         }
     }
 
@@ -82,20 +85,91 @@ impl MasterGovernor {
         empty_rdb
     }
 
-    pub fn set_slave_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
-        if let Ok(mut slave_instances) = self.slave_instances.write() {
-            slave_instances.push(stream);
+    pub fn set_replica_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
+        if let Ok(mut replicas) = self.connected_replicas.write() {
+            let status = ReplicaStatus::Connected;
+            let replica = Replica { stream, status };
+            replicas.push(replica);
+        }
+    }
+
+    fn get_replica_ack(&self) {
+        if let Ok(mut replicas) = self.connected_replicas.write() {
+            for repl in replicas.iter_mut() {
+                let mut stream = repl.stream.lock().unwrap();
+                if let Ok(()) = stream.write_all(
+                    RespBuilder::new()
+                        .add_array(&3)
+                        .add_bulk_string("REPLCONF")
+                        .add_bulk_string("GETACK")
+                        .add_bulk_string("*")
+                        .as_bytes(),
+                ) {
+                    repl.status = ReplicaStatus::AckReceived;
+                }
+            }
         }
     }
 }
 
 impl Master for MasterGovernor {
+    fn confirm_replica_ack(
+        &self,
+        repl_number: u8,
+        max_wait_time_millis: u64,
+    ) -> Result<Option<u8>, GovError> {
+        {
+            if repl_number == 0 || self.connected_replicas.read().iter().len() == 0 {
+                return Ok(Some(0));
+            }
+        }
+
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let t = timed_out.clone();
+
+        thread::spawn(move || {
+            thread::sleep(time::Duration::from_millis(max_wait_time_millis));
+            t.store(true, Ordering::SeqCst);
+        });
+
+        thread::scope(move |s| {
+            s.spawn(move || {
+                self.get_replica_ack();
+            });
+        });
+
+        loop {
+            if !timed_out.load(Ordering::SeqCst) {
+                let received_repl: Vec<ReplicaStatus> = {
+                    self.connected_replicas
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .filter(|&r| r.status == ReplicaStatus::AckReceived)
+                        .map(|r| r.status)
+                        .collect()
+                };
+
+                let current_acks = received_repl.len() as u8;
+
+                if current_acks >= repl_number {
+                    return Ok(Some(repl_number));
+                }
+                thread::sleep(time::Duration::from_millis(
+                    max_wait_time_millis / repl_number as u64,
+                ));
+            } else {
+                return Ok(None);
+            };
+        }
+    }
+
     fn propagate_command(&self, cmd: command::Command) {
         if should_propagate_command(cmd.clone()) {
             self.repl_offset.fetch_add(0, Ordering::SeqCst);
-            if let Ok(slave_instances) = self.slave_instances.read() {
-                for stream in slave_instances.iter() {
-                    if let Ok(mut stream) = stream.lock() {
+            if let Ok(replicas) = self.connected_replicas.read() {
+                for repl in replicas.iter() {
+                    if let Ok(mut stream) = repl.stream.lock() {
                         let out = command::serialize_command(cmd.clone());
                         let _ = stream.write_all(out.as_bytes());
                     }
@@ -137,78 +211,21 @@ impl Master for MasterGovernor {
         }
 
         let stream = Arc::new(Mutex::new(stream));
-        self.set_slave_instance(stream);
+        self.set_replica_instance(stream);
 
         Ok(mode)
-    }
-
-    fn start_store_manager(&mut self) {
-        match self.cleanup_type {
-            ExpireStrategy::Scheduled(interval) => {
-                let store = Arc::clone(&self.datastore);
-                thread::spawn(move || {
-                    loop {
-                        thread::sleep(interval);
-                        store.cleanup();
-                    }
-                });
-            }
-            ExpireStrategy::Lazy => {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let _ = self.datastore.add_channel_subscriber("*", tx);
-                let next_tick = Arc::new(RwLock::new(0));
-
-                let nt = Arc::clone(&next_tick);
-                thread::spawn(move || {
-                    while let Ok(event) = rx.recv() {
-                        if let Event::ExpireUpdated(exp_time_millis) = event {
-                            let should_update = {
-                                let rt = nt.read().unwrap();
-                                let now = time::SystemTime::now()
-                                    .duration_since(time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis();
-                                *rt < now || *rt > exp_time_millis
-                            };
-
-                            if should_update {
-                                let mut wt = nt.write().unwrap();
-                                *wt = exp_time_millis;
-                            }
-                        }
-                    }
-                });
-
-                let tt = Arc::clone(&next_tick);
-                let store = Arc::clone(&self.datastore);
-                thread::spawn(move || {
-                    loop {
-                        let should_cleanup = {
-                            let rt = tt.read().unwrap();
-                            if *rt > 0 {
-                                let now = time::SystemTime::now()
-                                    .duration_since(time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis();
-                                *rt <= now
-                            } else {
-                                false
-                            }
-                        };
-                        if should_cleanup {
-                            store.cleanup();
-                            let mut wt = next_tick.write().unwrap();
-                            *wt = 0;
-                        }
-                        thread::sleep(time::Duration::from_millis(1));
-                    }
-                });
-            }
-        }
     }
 }
 
 impl Governor for MasterGovernor {
+    fn get_datastore(&self) -> Arc<DataStore> {
+        Arc::clone(&self.datastore)
+    }
+
+    fn get_expire_strategy(&self) -> Option<ExpireStrategy> {
+        Some(self.cleanup_type)
+    }
+
     fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
         let mut result = Vec::new();
         for opt in options {
