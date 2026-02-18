@@ -53,3 +53,9 @@ pub enum Psync {
     FullResync(String, u64),
     Continue,
 }
+
+#[derive(Default)]
+pub struct Config {
+    pub db_filename: String,
+    pub db_directory: String,
+}

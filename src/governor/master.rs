@@ -12,7 +12,7 @@ use crate::command;
 use crate::governor::{
     error::GovError,
     traits::{Governor, Master},
-    types::{ExpireStrategy, Info, Psync, ReplicaOffsetState},
+    types::{Config, ExpireStrategy, Info, Psync, ReplicaOffsetState},
 };
 use crate::resp::RespBuilder;
 use crate::store::DataStore;
@@ -29,16 +29,20 @@ pub struct MasterGovernor {
     datastore: Arc<DataStore>,
     cleanup_type: ExpireStrategy,
     replicas: RwLock<Vec<Replica>>,
+    db_directory: String,
+    db_filename: String,
 }
 
 impl MasterGovernor {
-    pub fn new(datastore: Arc<DataStore>, cleanup_type: ExpireStrategy) -> Self {
+    pub fn new(datastore: Arc<DataStore>, cleanup_type: ExpireStrategy, config: Config) -> Self {
         MasterGovernor {
             repl_id: generate_random_id(),
             repl_offset: AtomicU64::new(0),
             datastore,
             cleanup_type,
             replicas: RwLock::new(Vec::new()),
+            db_directory: config.db_directory,
+            db_filename: config.db_filename,
         }
     }
 
@@ -159,6 +163,13 @@ impl MasterGovernor {
 }
 
 impl Master for MasterGovernor {
+    fn get_config(&self) -> Config {
+        Config {
+            db_filename: self.db_filename.clone(),
+            db_directory: self.db_directory.clone(),
+        }
+    }
+
     fn confirm_replica_ack(
         &self,
         repl_number: u8,

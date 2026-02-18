@@ -8,7 +8,7 @@ use crate::{
     command,
     governor::{
         error::GovError,
-        types::{ExpireStrategy, Info, Psync},
+        types::{Config, ExpireStrategy, Info, Psync},
     },
     resp::RespBuilder,
     store::{DataStore, Event},
@@ -123,6 +123,7 @@ pub trait Governor {
 }
 
 pub trait Master: Governor {
+    fn get_config(&self) -> Config;
     fn propagate_command(&self, command: command::Command);
     fn confirm_replica_ack(&self, repl_count: u8, wait_time: u64) -> Result<Option<u8>, GovError>;
 

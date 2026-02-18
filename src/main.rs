@@ -1,12 +1,11 @@
 use args::Value;
 use command::{Command, prepare_command};
-use config::Config;
 use governor::{
     instance::GovernorInstance,
     master::MasterGovernor,
     slave::SlaveGovernor,
     traits::{Governor, Master, Slave},
-    types::{ExpireStrategy, Role},
+    types::{Config, ExpireStrategy, Role},
 };
 use resp::RespBuilder;
 use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread};
@@ -20,7 +19,7 @@ mod resp;
 mod store;
 
 fn main() {
-    let config = Config::new();
+    let config = config::Config::new();
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     println!("Server listening on {}:{}", config.host, config.port);
     println!(
@@ -45,6 +44,10 @@ fn main() {
         Role::Master => GovernorInstance::Master(MasterGovernor::new(
             Arc::clone(&store),
             ExpireStrategy::Lazy,
+            Config {
+                db_filename: config.db_filename,
+                db_directory: config.db_dir,
+            },
         )),
     };
 
@@ -229,6 +232,30 @@ fn handle_cmd(
                 resp.add_simple_error(err.to_string().as_str());
                 return resp;
             }
+        }
+        return resp;
+    }
+
+    if let Command::ConfigGet(args) = command {
+        let mut config_args: Vec<&str> = Vec::new();
+        let config = governor.get_config();
+        for arg in args {
+            match arg.to_string().as_str() {
+                "dir" => {
+                    config_args.push("dir");
+                    config_args.push(&config.db_directory);
+                }
+                "dbfilename" => {
+                    config_args.push("dbfilename");
+                    config_args.push(&config.db_filename);
+                }
+                _ => {}
+            }
+        }
+        let mut resp = RespBuilder::new();
+        resp.add_array(&config_args.len());
+        for arg in config_args {
+            resp.add_bulk_string(arg);
         }
         return resp;
     }
@@ -559,6 +586,11 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
         Command::Exec => {
             let mut resp = RespBuilder::new();
             resp.add_simple_error("ERR EXEC without MULTI");
+            resp
+        }
+        Command::ConfigGet(_) => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR CONFIG not handled");
             resp
         }
     }

@@ -11,6 +11,7 @@ pub enum Command {
     ReplConf(String, String),
     Psync(String, i64),
     Wait(u8, u64),
+    ConfigGet(Vec<String>),
     // store
     Type(StringKey),
     // string
@@ -248,6 +249,19 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                         let replica_count = command_parts[1].parse::<u8>().ok()?;
                         let wait_time = command_parts[2].parse::<u64>().ok()?;
                         Some(Command::Wait(replica_count, wait_time))
+                    } else {
+                        None
+                    }
+                }
+                "CONFIG" => {
+                    if command_parts.len() >= 3 {
+                        match command_parts[1].to_uppercase().as_str() {
+                            "GET" => {
+                                let list = command_parts[2..].iter().map(|&s| s.into()).collect();
+                                Some(Command::ConfigGet(list))
+                            }
+                            _ => None,
+                        }
                     } else {
                         None
                     }
@@ -601,6 +615,16 @@ pub fn serialize_command(command: Command) -> String {
             .add_bulk_string(&count.to_string())
             .add_bulk_string(&wait.to_string())
             .to_string(),
+        Command::ConfigGet(args) => {
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(args.len() + 2));
+            resp.add_bulk_string("CONFIG");
+            resp.add_bulk_string("GET");
+            for arg in args {
+                resp.add_bulk_string(&arg);
+            }
+            resp.to_string()
+        }
     }
 }
 

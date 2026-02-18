@@ -4,7 +4,7 @@ use crate::{
         master::MasterGovernor,
         slave::SlaveGovernor,
         traits::{Governor, Master, Slave},
-        types::{ExpireStrategy, Info, Psync},
+        types::{Config, ExpireStrategy, Info, Psync},
     },
     store::DataStore,
 };
@@ -55,6 +55,12 @@ impl Governor for GovernorInstance {
 }
 
 impl Master for GovernorInstance {
+    fn get_config(&self) -> super::types::Config {
+        match self {
+            GovernorInstance::Master(m) => m.get_config(),
+            GovernorInstance::Slave(_) => Config::default(),
+        }
+    }
     fn confirm_replica_ack(&self, repl_count: u8, wait_time: u64) -> Result<Option<u8>, GovError> {
         match self {
             GovernorInstance::Master(m) => m.confirm_replica_ack(repl_count, wait_time),
