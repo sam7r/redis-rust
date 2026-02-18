@@ -13,10 +13,12 @@ pub enum Role {
     Slave,
 }
 
+#[allow(dead_code)]
 #[derive(Eq, PartialEq, Clone, Copy)]
 pub enum ReplicaStatus {
     Connected,
-    AckReceived,
+    Disconnected,
+    Syncing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

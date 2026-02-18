@@ -1,6 +1,6 @@
 use rand::{RngExt, distr::Alphanumeric};
 use std::{
-    io::Write,
+    io::{Read, Write},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -19,6 +19,7 @@ use crate::store::DataStore;
 
 struct Replica {
     pub status: ReplicaStatus,
+    pub offset: u64,
     pub stream: Arc<Mutex<std::net::TcpStream>>,
 }
 
@@ -27,7 +28,7 @@ pub struct MasterGovernor {
     repl_offset: AtomicU64,
     datastore: Arc<DataStore>,
     cleanup_type: ExpireStrategy,
-    connected_replicas: RwLock<Vec<Replica>>,
+    replicas: RwLock<Vec<Replica>>,
 }
 
 impl MasterGovernor {
@@ -37,7 +38,7 @@ impl MasterGovernor {
             repl_offset: AtomicU64::new(0),
             datastore,
             cleanup_type,
-            connected_replicas: RwLock::new(Vec::new()),
+            replicas: RwLock::new(Vec::new()),
         }
     }
 
@@ -86,18 +87,27 @@ impl MasterGovernor {
     }
 
     pub fn set_replica_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
-        if let Ok(mut replicas) = self.connected_replicas.write() {
+        if let Ok(mut replicas) = self.replicas.write() {
             let status = ReplicaStatus::Connected;
-            let replica = Replica { stream, status };
+            let replica = Replica {
+                stream,
+                status,
+                offset: 0,
+            };
             replicas.push(replica);
         }
     }
 
     fn get_replica_ack(&self) {
-        if let Ok(mut replicas) = self.connected_replicas.write() {
-            for repl in replicas.iter_mut() {
+        if let Ok(mut replicas) = self.replicas.write()
+            && self.repl_offset.load(Ordering::SeqCst) > 0
+        {
+            for repl in replicas
+                .iter_mut()
+                .filter(|r| r.status != ReplicaStatus::Disconnected)
+            {
                 let mut stream = repl.stream.lock().unwrap();
-                if let Ok(()) = stream.write_all(
+                match stream.write(
                     RespBuilder::new()
                         .add_array(&3)
                         .add_bulk_string("REPLCONF")
@@ -105,7 +115,32 @@ impl MasterGovernor {
                         .add_bulk_string("*")
                         .as_bytes(),
                 ) {
-                    repl.status = ReplicaStatus::AckReceived;
+                    Ok(0) | Err(_) => {
+                        println!("GETACK not sent, asumming disconnected");
+                        repl.status = ReplicaStatus::Disconnected;
+                        continue;
+                    }
+                    Ok(_) => {}
+                }
+
+                let mut buff = [0; 512];
+                match stream.read(&mut buff) {
+                    Ok(0) | Err(_) => {
+                        println!("No ACK, assuming disconnected");
+                        repl.status = ReplicaStatus::Disconnected;
+                        continue;
+                    }
+                    Ok(bytes_read) => {
+                        let response = String::from_utf8_lossy(&buff[..bytes_read]);
+                        let out = command::prepare_command(&response);
+                        if let Some(command::Command::ReplConf(_, offset)) = out {
+                            repl.status = ReplicaStatus::Connected;
+                            repl.offset = offset.parse::<u64>().unwrap();
+                            println!("ACK Received offset {}", repl.offset)
+                        } else {
+                            println!("GETACK unexpected response {}", &response);
+                        }
+                    }
                 }
             }
         }
@@ -119,7 +154,7 @@ impl Master for MasterGovernor {
         max_wait_time_millis: u64,
     ) -> Result<Option<u8>, GovError> {
         {
-            if repl_number == 0 || self.connected_replicas.read().iter().len() == 0 {
+            if repl_number == 0 || self.replicas.read().iter().len() == 0 {
                 return Ok(Some(0));
             }
         }
@@ -139,27 +174,27 @@ impl Master for MasterGovernor {
         });
 
         loop {
+            let received_repl: Vec<ReplicaStatus> = {
+                self.replicas
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .filter(|&r| r.status == ReplicaStatus::Connected)
+                    .map(|r| r.status)
+                    .collect()
+            };
+
+            let current_acks = received_repl.len() as u8;
+
             if !timed_out.load(Ordering::SeqCst) {
-                let received_repl: Vec<ReplicaStatus> = {
-                    self.connected_replicas
-                        .read()
-                        .unwrap()
-                        .iter()
-                        .filter(|&r| r.status == ReplicaStatus::AckReceived)
-                        .map(|r| r.status)
-                        .collect()
-                };
-
-                let current_acks = received_repl.len() as u8;
-
                 if current_acks >= repl_number {
-                    return Ok(Some(repl_number));
+                    return Ok(Some(current_acks));
                 }
                 thread::sleep(time::Duration::from_millis(
                     max_wait_time_millis / repl_number as u64,
                 ));
             } else {
-                return Ok(None);
+                return Ok(Some(current_acks));
             };
         }
     }
@@ -167,7 +202,7 @@ impl Master for MasterGovernor {
     fn propagate_command(&self, cmd: command::Command) {
         if should_propagate_command(cmd.clone()) {
             self.repl_offset.fetch_add(0, Ordering::SeqCst);
-            if let Ok(replicas) = self.connected_replicas.read() {
+            if let Ok(replicas) = self.replicas.read() {
                 for repl in replicas.iter() {
                     if let Ok(mut stream) = repl.stream.lock() {
                         let out = command::serialize_command(cmd.clone());

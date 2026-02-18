@@ -228,6 +228,7 @@ impl Governor for SlaveGovernor {
     fn get_expire_strategy(&self) -> Option<ExpireStrategy> {
         Some(self.expire_strategy)
     }
+
     fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError> {
         let mut result = Vec::new();
         for opt in options {
