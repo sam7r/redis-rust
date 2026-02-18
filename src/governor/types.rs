@@ -15,10 +15,20 @@ pub enum Role {
 
 #[allow(dead_code)]
 #[derive(Eq, PartialEq, Clone, Copy)]
-pub enum ReplicaStatus {
-    Connected,
-    Disconnected,
-    Syncing,
+pub enum ReplicaOffsetState {
+    Confirmed,
+    Unconfirmed,
+    Unknown,
+}
+
+impl std::fmt::Display for ReplicaOffsetState {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ReplicaOffsetState::Confirmed => write!(f, "Confirmed"),
+            ReplicaOffsetState::Unconfirmed => write!(f, "Unconfirmed"),
+            ReplicaOffsetState::Unknown => write!(f, "Unknown"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

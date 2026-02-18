@@ -12,13 +12,13 @@ use crate::command;
 use crate::governor::{
     error::GovError,
     traits::{Governor, Master},
-    types::{ExpireStrategy, Info, Psync, ReplicaStatus},
+    types::{ExpireStrategy, Info, Psync, ReplicaOffsetState},
 };
 use crate::resp::RespBuilder;
 use crate::store::DataStore;
 
 struct Replica {
-    pub status: ReplicaStatus,
+    pub status: ReplicaOffsetState,
     pub offset: u64,
     pub stream: Arc<Mutex<std::net::TcpStream>>,
 }
@@ -86,9 +86,9 @@ impl MasterGovernor {
         empty_rdb
     }
 
-    pub fn set_replica_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
+    pub fn register_replica_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
         if let Ok(mut replicas) = self.replicas.write() {
-            let status = ReplicaStatus::Connected;
+            let status = ReplicaOffsetState::Confirmed;
             let replica = Replica {
                 stream,
                 status,
@@ -98,51 +98,62 @@ impl MasterGovernor {
         }
     }
 
+    fn add_repl_offset(&self, n: u64) {
+        let prev = self.repl_offset.fetch_add(n, Ordering::SeqCst);
+        println!("Updating master offset: {} -> {}", prev, prev + n);
+    }
+
     fn get_replica_ack(&self) {
         if let Ok(mut replicas) = self.replicas.write()
             && self.repl_offset.load(Ordering::SeqCst) > 0
         {
-            for repl in replicas
-                .iter_mut()
-                .filter(|r| r.status != ReplicaStatus::Disconnected)
-            {
+            let mut get_ack_query = RespBuilder::new();
+            get_ack_query
+                .add_array(&3)
+                .add_bulk_string("REPLCONF")
+                .add_bulk_string("GETACK")
+                .add_bulk_string("*");
+
+            for repl in replicas.iter_mut() {
                 let mut stream = repl.stream.lock().unwrap();
-                match stream.write(
-                    RespBuilder::new()
-                        .add_array(&3)
-                        .add_bulk_string("REPLCONF")
-                        .add_bulk_string("GETACK")
-                        .add_bulk_string("*")
-                        .as_bytes(),
-                ) {
+                match stream.write(get_ack_query.as_bytes()) {
                     Ok(0) | Err(_) => {
                         println!("GETACK not sent, asumming disconnected");
-                        repl.status = ReplicaStatus::Disconnected;
+                        repl.status = ReplicaOffsetState::Unknown;
                         continue;
                     }
                     Ok(_) => {}
                 }
 
                 let mut buff = [0; 512];
+                let _ = stream.set_read_timeout(Some(time::Duration::from_millis(100)));
                 match stream.read(&mut buff) {
                     Ok(0) | Err(_) => {
                         println!("No ACK, assuming disconnected");
-                        repl.status = ReplicaStatus::Disconnected;
+                        repl.status = ReplicaOffsetState::Unknown;
                         continue;
                     }
                     Ok(bytes_read) => {
                         let response = String::from_utf8_lossy(&buff[..bytes_read]);
                         let out = command::prepare_command(&response);
                         if let Some(command::Command::ReplConf(_, offset)) = out {
-                            repl.status = ReplicaStatus::Connected;
                             repl.offset = offset.parse::<u64>().unwrap();
-                            println!("ACK Received offset {}", repl.offset)
+                            if repl.offset != self.repl_offset.load(Ordering::SeqCst) {
+                                repl.status = ReplicaOffsetState::Unconfirmed;
+                            } else {
+                                repl.status = ReplicaOffsetState::Confirmed;
+                            }
+                            println!(
+                                "ACK Received offset {}, status updated to {}",
+                                repl.offset, repl.status
+                            )
                         } else {
                             println!("GETACK unexpected response {}", &response);
                         }
                     }
                 }
             }
+            self.add_repl_offset(get_ack_query.as_bytes().len() as u64);
         }
     }
 }
@@ -174,12 +185,12 @@ impl Master for MasterGovernor {
         });
 
         loop {
-            let received_repl: Vec<ReplicaStatus> = {
+            let received_repl: Vec<ReplicaOffsetState> = {
                 self.replicas
                     .read()
                     .unwrap()
                     .iter()
-                    .filter(|&r| r.status == ReplicaStatus::Connected)
+                    .filter(|&r| r.status == ReplicaOffsetState::Confirmed)
                     .map(|r| r.status)
                     .collect()
             };
@@ -200,16 +211,17 @@ impl Master for MasterGovernor {
     }
 
     fn propagate_command(&self, cmd: command::Command) {
-        if should_propagate_command(cmd.clone()) {
-            self.repl_offset.fetch_add(0, Ordering::SeqCst);
-            if let Ok(replicas) = self.replicas.read() {
-                for repl in replicas.iter() {
-                    if let Ok(mut stream) = repl.stream.lock() {
-                        let out = command::serialize_command(cmd.clone());
-                        let _ = stream.write_all(out.as_bytes());
-                    }
+        let out = command::serialize_command(cmd.clone());
+        if should_propagate_command(cmd.clone())
+            && let Ok(mut replicas) = self.replicas.write()
+        {
+            for repl in replicas.iter_mut() {
+                if let Ok(mut stream) = repl.stream.lock() {
+                    let _ = stream.write_all(out.as_bytes());
+                    repl.status = ReplicaOffsetState::Unconfirmed;
                 }
             }
+            self.add_repl_offset(out.len() as u64);
         }
     }
 
@@ -246,7 +258,7 @@ impl Master for MasterGovernor {
         }
 
         let stream = Arc::new(Mutex::new(stream));
-        self.set_replica_instance(stream);
+        self.register_replica_instance(stream);
 
         Ok(mode)
     }
