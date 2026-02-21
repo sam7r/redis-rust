@@ -372,7 +372,7 @@ fn process_subscribe_cmd(
         Command::Ping => {
             let mut resp = RespBuilder::new();
             resp.add_array(&2);
-            resp.add_simple_string("PONG");
+            resp.add_bulk_string("pong");
             resp.empty_bulk_string();
             resp
         }
