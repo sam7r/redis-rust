@@ -33,12 +33,25 @@ pub trait Governor {
             for entry in db.entries {
                 let key = String::from_utf8_lossy(&entry.key).to_string();
                 if let Some(expiry) = entry.expiry {
-                    let expiry_millis: u128 = match expiry {
+                    let key_expiry: u128 = match expiry {
                         Expiry::Seconds(s) => (s as u128) * 1000,
                         Expiry::Milliseconds(ms) => ms as u128,
                     };
+
+                    if time::SystemTime::now()
+                        .duration_since(time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                        >= key_expiry
+                    {
+                        println!("  Skipping expired key: {} - {}", key, key_expiry);
+                        continue;
+                    }
+
+                    println!("  Setting expire for key: {} to {} ms", key, key_expiry);
+
                     datastore
-                        .set_expire(&key, expiry_millis)
+                        .set_expire(&key, key_expiry)
                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 }
                 match entry.value {

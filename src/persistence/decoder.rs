@@ -113,13 +113,13 @@ impl<'a> RdbDecoder<'a> {
             Some(0xFD) => {
                 self.pos += 1;
                 let ts = self.read_bytes(4)?;
-                let secs = u32::from_be_bytes(ts.try_into().unwrap());
+                let secs = u32::from_le_bytes(ts.try_into().unwrap());
                 Ok(Some(Expiry::Seconds(secs)))
             }
             Some(0xFC) => {
                 self.pos += 1;
                 let ts = self.read_bytes(8)?;
-                let ms = u64::from_be_bytes(ts.try_into().unwrap());
+                let ms = u64::from_le_bytes(ts.try_into().unwrap());
                 Ok(Some(Expiry::Milliseconds(ms)))
             }
             _ => Ok(None),
