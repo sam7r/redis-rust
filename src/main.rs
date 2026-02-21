@@ -8,13 +8,24 @@ use governor::{
     types::{Config, ExpireStrategy, Role},
 };
 use resp::RespBuilder;
-use std::{io::Read, io::Write, net::TcpListener, sync::Arc, thread};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    sync::Arc,
+    thread,
+};
 use store::DataStore;
+
+use crate::message::{
+    broker::{Broker, MessageBroker},
+    types::{Message, SubscriberId, TopicFilter},
+};
 
 mod args;
 mod command;
 mod config;
 mod governor;
+mod message;
 mod persistence;
 mod resp;
 mod store;
@@ -24,7 +35,7 @@ fn main() {
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).unwrap();
     println!("Server listening on {}:{}", config.host, config.port);
     println!(
-        "Running in mode {}",
+        "Running in replica mode {}",
         match config.replica_of {
             Some(Value::Single(ref addr)) => format!("slave (replica of {})", addr),
             _ => "master".to_string(),
@@ -56,7 +67,7 @@ fn main() {
         GovernorInstance::Master(ref mut master_gov) => {
             master_gov.start_expire_manager();
             master_gov.load_rdb_from_file().unwrap_or_else(|err| {
-                eprintln!("error loading RDB data: {}", err);
+                eprintln!("ERR Failed to load RDB from file: {}", err);
                 std::process::exit(1);
             });
         }
@@ -65,7 +76,7 @@ fn main() {
                 println!("Starting replication from master at {}", master_addr);
                 match slave_gov.start_replication(&master_addr, &config.port) {
                     Ok(_) => println!("Replication started successfully"),
-                    Err(err) => eprintln!("Failed to start replication: {}", err),
+                    Err(err) => eprintln!("ERR Failed to start replication: {}", err),
                 }
                 slave_gov.start_expire_manager();
             }
@@ -73,13 +84,16 @@ fn main() {
     }
 
     let gov = Arc::new(governor_instance);
+    let messenger = Arc::new(Broker::new());
+
     for stream in listener.incoming() {
         println!("New client connected");
         let kv_store = Arc::clone(&store);
         let store_gov = Arc::clone(&gov);
+        let message_broker = Arc::clone(&messenger);
 
         thread::spawn(move || {
-            handle_client(stream.unwrap(), kv_store, store_gov);
+            handle_client(stream.unwrap(), kv_store, store_gov, message_broker);
         });
     }
 }
@@ -87,61 +101,286 @@ fn main() {
 enum Mode {
     Normal,
     Transaction,
+    Subscribe,
 }
 
 fn handle_client(
     mut stream: std::net::TcpStream,
     store: Arc<DataStore>,
     governor: Arc<GovernorInstance>,
+    messenger: Arc<Broker>,
 ) {
     let mut mode = Mode::Normal;
     let mut queue: Vec<Command> = Vec::new();
+    let mut subscriber_id: Option<SubscriberId> = None;
 
     loop {
         let mut buffer = [0; 512];
         let bytes_read = stream.read(&mut buffer);
 
         match bytes_read {
-            Ok(0) => break,
+            Ok(0) => {
+                println!("Client disconnected");
+                if let Mode::Subscribe = mode
+                    && let Some(id) = subscriber_id
+                {
+                    messenger.drop_subscriber(id).unwrap_or_else(|err| {
+                        eprintln!("ERR Failed to drop subscriber {}: {}", id, err);
+                    });
+                }
+                break;
+            }
             Ok(n) => {
                 let input = String::from_utf8_lossy(&buffer[..n]);
                 let kv_store = Arc::clone(&store);
                 let store_gov = Arc::clone(&governor);
+                let message_broker = Arc::clone(&messenger);
 
                 if let Some(cmd) = prepare_command(&input) {
-                    if let Command::Psync(replication_id, offset) = cmd.clone()
-                        && let GovernorInstance::Master(master_gov) = governor.as_ref()
-                    {
-                        let _ = master_gov.handle_psync(stream, &replication_id, offset);
-                        break;
-                    } else {
-                        match mode {
-                            Mode::Transaction => {
-                                let resp =
-                                    handle_tx(kv_store, store_gov, cmd, &mut mode, &mut queue);
-                                write_to_stream(&mut stream, resp.as_bytes());
+                    match mode {
+                        Mode::Subscribe => {
+                            let resp = process_subscribe_cmd(
+                                message_broker,
+                                cmd,
+                                subscriber_id.unwrap_or(0),
+                                &mut mode,
+                            );
+                            write_to_stream(&mut stream, resp.as_bytes());
+                        }
+                        Mode::Transaction => {
+                            let resp = process_transaction_cmd(
+                                kv_store,
+                                store_gov,
+                                message_broker,
+                                cmd,
+                                &mut mode,
+                                &mut queue,
+                            );
+                            write_to_stream(&mut stream, resp.as_bytes());
+                        }
+                        Mode::Normal => {
+                            if let Command::Psync(replication_id, offset) = cmd.clone()
+                                && let GovernorInstance::Master(master_gov) = governor.as_ref()
+                            {
+                                let _ = master_gov.handle_psync(stream, &replication_id, offset);
+                                break;
                             }
-                            Mode::Normal => {
-                                let resp = handle_cmd(kv_store, store_gov, cmd, &mut mode);
-                                write_to_stream(&mut stream, resp.as_bytes());
+                            if let Command::Subscribe(topics) = cmd.clone() {
+                                handle_new_subscriber(
+                                    message_broker,
+                                    &mut subscriber_id,
+                                    &mut mode,
+                                    topics,
+                                    stream.try_clone().unwrap(),
+                                );
+                                continue;
                             }
+                            let resp = process_normal_cmd(
+                                kv_store,
+                                store_gov,
+                                message_broker,
+                                cmd,
+                                &mut mode,
+                            );
+                            write_to_stream(&mut stream, resp.as_bytes());
                         }
                     }
                 } else {
-                    write_error_to_stream(&mut stream, "unable to handle request");
+                    write_error_to_stream(&mut stream, "ERR Unable to handle request");
                 }
             }
             Err(err) => {
-                eprintln!("error reading from stream: {}", err);
+                eprintln!("ERR unable to read from stream: {}", err);
                 break;
             }
         }
     }
 }
 
-fn handle_tx(
+fn handle_new_subscriber(
+    messenger: Arc<Broker>,
+    subscriber_id: &mut Option<SubscriberId>,
+    mode: &mut Mode,
+    topics: Vec<String>,
+    mut stream: std::net::TcpStream,
+) {
+    match messenger.register_subscriber() {
+        Ok((id, rx)) => {
+            *subscriber_id = Some(id);
+            *mode = Mode::Subscribe;
+
+            for topic in topics.iter() {
+                messenger
+                    .subscribe(id, TopicFilter::Exact(topic.clone()))
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to subscribe subscriber {}: {}", id, err);
+                        Some(0)
+                    });
+            }
+
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(topics.len() + 2));
+            resp.add_bulk_string("subscribe");
+            for topic in topics.iter() {
+                resp.add_bulk_string(topic);
+            }
+            resp.add_integer(&(topics.len().to_string()));
+            write_to_stream(&mut stream, resp.as_bytes());
+
+            thread::spawn(move || {
+                for message in rx.iter() {
+                    let mut msg_resp = RespBuilder::new();
+                    msg_resp.add_array(&3);
+                    msg_resp.add_bulk_string("message");
+                    msg_resp.add_bulk_string(&message.topic);
+                    msg_resp.add_bulk_string(&message.payload);
+                    write_to_stream(&mut stream, msg_resp.as_bytes());
+                }
+                println!("Subscriber thread exiting");
+            });
+        }
+        Err(err) => {
+            eprintln!("Failed to register subscriber: {}", err);
+            write_error_to_stream(&mut stream, "ERR Failed to register subscriber");
+        }
+    }
+}
+
+fn process_subscribe_cmd(
+    messenger: Arc<Broker>,
+    command: Command,
+    subscriber_id: SubscriberId,
+    mode: &mut Mode,
+) -> RespBuilder {
+    match command {
+        Command::Quit => {
+            *mode = Mode::Normal;
+            messenger
+                .drop_subscriber(subscriber_id)
+                .unwrap_or_else(|err| {
+                    eprintln!("Failed to drop subscriber {}: {}", subscriber_id, err);
+                });
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("OK");
+            resp
+        }
+        Command::Reset => {
+            messenger
+                .unsubscribe_all(subscriber_id)
+                .unwrap_or_else(|err| {
+                    eprintln!(
+                        "Failed to unsubscribe subscriber {}: {}",
+                        subscriber_id, err
+                    );
+                });
+            let mut resp = RespBuilder::new();
+            resp.add_simple_string("OK");
+            resp
+        }
+        Command::Subscribe(topics) => {
+            let mut subs = 0;
+            for topic in topics.iter() {
+                if let Some(count) = messenger
+                    .subscribe(subscriber_id, TopicFilter::Exact(topic.clone()))
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to subscribe subscriber {}: {}", subscriber_id, err);
+                        Some(0)
+                    })
+                {
+                    subs = count;
+                }
+            }
+
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(topics.len() + 2));
+            resp.add_bulk_string("subscribe");
+            for topic in topics.iter() {
+                resp.add_bulk_string(topic);
+            }
+            resp.add_integer(&(subs.to_string()));
+            resp
+        }
+        Command::Unsubscribe(topics) => {
+            let mut subs = 0;
+            for topic in topics.iter() {
+                if let Some(count) = messenger
+                    .unsubscribe(subscriber_id, TopicFilter::Exact(topic.clone()))
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to subscribe subscriber {}: {}", subscriber_id, err);
+                        Some(0)
+                    })
+                {
+                    subs = count;
+                }
+            }
+
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(topics.len() + 2));
+            resp.add_bulk_string("unsubscribe");
+            for topic in topics.iter() {
+                resp.add_bulk_string(topic);
+            }
+            resp.add_integer(&(subs.to_string()));
+            resp
+        }
+        Command::Psubscribe(topics) => {
+            let mut subs = 0;
+            for topic in topics.iter() {
+                if let Some(count) = messenger
+                    .subscribe(subscriber_id, TopicFilter::Pattern(topic.clone()))
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to subscribe subscriber {}: {}", subscriber_id, err);
+                        Some(0)
+                    })
+                {
+                    subs = count;
+                }
+            }
+
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(topics.len() + 2));
+            resp.add_bulk_string("subscribe");
+            for topic in topics.iter() {
+                resp.add_bulk_string(topic);
+            }
+            resp.add_integer(&(subs.to_string()));
+            resp
+        }
+        Command::Punsubscribe(topics) => {
+            let mut subs = 0;
+            for topic in topics.iter() {
+                if let Some(count) = messenger
+                    .unsubscribe(subscriber_id, TopicFilter::Pattern(topic.clone()))
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to subscribe subscriber {}: {}", subscriber_id, err);
+                        Some(0)
+                    })
+                {
+                    subs = count;
+                }
+            }
+
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(topics.len() + 2));
+            resp.add_bulk_string("unsubscribe");
+            for topic in topics.iter() {
+                resp.add_bulk_string(topic);
+            }
+            resp.add_integer(&(subs.to_string()));
+            resp
+        }
+        _ => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR Can't execute 'echo': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context");
+            resp
+        }
+    }
+}
+
+fn process_transaction_cmd(
     store: Arc<DataStore>,
     governor: Arc<GovernorInstance>,
+    messenger: Arc<Broker>,
     command: Command,
     mode: &mut Mode,
     queue: &mut Vec<Command>,
@@ -158,7 +397,13 @@ fn handle_tx(
             let mut resp = RespBuilder::new();
             resp.add_array(&queue.len());
             for cmd in queue.iter() {
-                let cmd_resp = handle_cmd(store.clone(), governor.clone(), cmd.clone(), mode);
+                let cmd_resp = process_normal_cmd(
+                    store.clone(),
+                    governor.clone(),
+                    messenger.clone(),
+                    cmd.clone(),
+                    mode,
+                );
                 resp.join(&cmd_resp.to_string());
             }
             queue.clear();
@@ -174,14 +419,30 @@ fn handle_tx(
     }
 }
 
-fn handle_cmd(
+fn process_normal_cmd(
     store: Arc<DataStore>,
     governor: Arc<GovernorInstance>,
+    messenger: Arc<Broker>,
     command: Command,
     mode: &mut Mode,
 ) -> RespBuilder {
     if let GovernorInstance::Master(master_gov) = governor.as_ref() {
         master_gov.propagate_command(command.clone());
+    }
+
+    if let Command::Publish(topic, payload) = command {
+        let message = Message {
+            topic: topic.clone(),
+            payload,
+        };
+        let mut resp = RespBuilder::new();
+        if let Ok(Some(count)) = messenger.publish(message) {
+            resp.add_integer(&count.to_string());
+            return resp;
+        } else {
+            resp.add_simple_error("ERR Failed to publish message");
+        }
+        return resp;
     }
 
     if let Command::ReplConf(arg, value) = command {
@@ -603,7 +864,7 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
         }
         Command::Wait(_, _) => {
             let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR unhandled PSYNC request");
+            resp.add_simple_error("ERR unhandled WAIT request");
             resp
         }
         Command::ReplConf(_, _) | Command::Info(_) => {
@@ -629,6 +890,22 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
         Command::BgSave => {
             let mut resp = RespBuilder::new();
             resp.add_simple_error("ERR BGSAVE not handled");
+            resp
+        }
+        Command::Publish(_, _)
+        | Command::Subscribe(_)
+        | Command::Quit
+        | Command::Psubscribe(_)
+        | Command::Unsubscribe(_)
+        | Command::Punsubscribe(_) => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR unhandled subscription command");
+            resp
+        }
+        Command::Reset => {
+            *mode = Mode::Normal;
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("OK");
             resp
         }
     }

@@ -27,7 +27,7 @@ pub enum Command {
     Llen(StringKey),
     Lpop(StringKey, u8),
     Blpop(StringKey, f32),
-    // srteam
+    // stream
     Xadd(StreamKey, StringKey, Vec<(String, String)>),
     Xrange(StreamKey, StringKey, StringKey),
     Xread(Vec<StreamOption>),
@@ -35,6 +35,14 @@ pub enum Command {
     Multi,
     Exec,
     Discard,
+    // pub/sub
+    Publish(String, String),
+    Subscribe(Vec<String>),
+    Psubscribe(Vec<String>),
+    Unsubscribe(Vec<String>),
+    Punsubscribe(Vec<String>),
+    Reset,
+    Quit,
 }
 
 pub fn prepare_commands(data: &str) -> Vec<(Option<Command>, usize)> {
@@ -276,6 +284,64 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                         None
                     }
                 }
+                "PUBLISH" => {
+                    if command_parts.len() >= 3 {
+                        Some(Command::Publish(
+                            command_parts[1].to_string(),
+                            command_parts[2].to_string(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                "SUBSCRIBE" => {
+                    if command_parts.len() >= 2 {
+                        let channels = command_parts[1..].iter().map(|&c| c.into()).collect();
+                        Some(Command::Subscribe(channels))
+                    } else {
+                        None
+                    }
+                }
+                "PSUBSCRIBE" => {
+                    if command_parts.len() >= 2 {
+                        let channels = command_parts[1..].iter().map(|&c| c.into()).collect();
+                        Some(Command::Psubscribe(channels))
+                    } else {
+                        None
+                    }
+                }
+                "UNSUBSCRIBE" => {
+                    if command_parts.len() >= 2 {
+                        let channels = command_parts[1..].iter().map(|&c| c.into()).collect();
+                        Some(Command::Unsubscribe(channels))
+                    } else {
+                        None
+                    }
+                }
+                "PUNSUBSCRIBE" => {
+                    if command_parts.len() >= 2 {
+                        let channel_patterns =
+                            command_parts[1..].iter().map(|&c| c.into()).collect();
+                        Some(Command::Punsubscribe(channel_patterns))
+                    } else {
+                        None
+                    }
+                }
+                "RESET" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Reset)
+                    } else {
+                        None
+                    }
+                }
+                "QUIT" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Quit)
+                    } else {
+                        None
+                    }
+                }
+
                 _ => None,
             }
         }
@@ -450,6 +516,12 @@ fn prepare_info_options(args: Vec<&str>) -> Vec<Info> {
 
 pub fn serialize_command(command: Command) -> String {
     match command {
+        Command::Publish(chan, msg) => RespBuilder::new()
+            .add_array(&3)
+            .add_bulk_string("PUBLISH")
+            .add_bulk_string(&chan)
+            .add_bulk_string(&msg)
+            .to_string(),
         Command::Ping => RespBuilder::new()
             .add_array(&1)
             .add_bulk_string("PING")
@@ -643,6 +715,50 @@ pub fn serialize_command(command: Command) -> String {
             .add_array(&2)
             .add_bulk_string("KEYS")
             .add_bulk_string(&query)
+            .to_string(),
+        Command::Subscribe(channels) => {
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(channels.len() + 2));
+            resp.add_bulk_string("SUBSCRIBE");
+            for ch in channels {
+                resp.add_bulk_string(&ch);
+            }
+            resp.to_string()
+        }
+        Command::Psubscribe(channels) => {
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(channels.len() + 2));
+            resp.add_bulk_string("PSUBSCRIBE");
+            for ch in channels {
+                resp.add_bulk_string(&ch);
+            }
+            resp.to_string()
+        }
+        Command::Unsubscribe(channels) => {
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(channels.len() + 2));
+            resp.add_bulk_string("UNSUBSCRIBE");
+            for ch in channels {
+                resp.add_bulk_string(&ch);
+            }
+            resp.to_string()
+        }
+        Command::Punsubscribe(channels) => {
+            let mut resp = RespBuilder::new();
+            resp.add_array(&(channels.len() + 2));
+            resp.add_bulk_string("PUNSUBSCRIBE");
+            for ch in channels {
+                resp.add_bulk_string(&ch);
+            }
+            resp.to_string()
+        }
+        Command::Quit => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("QUIT")
+            .to_string(),
+        Command::Reset => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("RESET")
             .to_string(),
     }
 }

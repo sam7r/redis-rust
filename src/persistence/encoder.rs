@@ -47,13 +47,13 @@ impl RdbEncoder {
 
     pub fn write_expire_seconds(&mut self, timestamp: u32) -> &mut Self {
         self.data.push(OpCode::ExpiryTime.as_u8());
-        self.data.extend_from_slice(&timestamp.to_be_bytes());
+        self.data.extend_from_slice(&timestamp.to_le_bytes());
         self
     }
 
     pub fn write_expire_millis(&mut self, timestamp: u64) -> &mut Self {
         self.data.push(OpCode::ExpiryTimeMS.as_u8());
-        self.data.extend_from_slice(&timestamp.to_be_bytes());
+        self.data.extend_from_slice(&timestamp.to_le_bytes());
         self
     }
 
