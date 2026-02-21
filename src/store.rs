@@ -11,6 +11,8 @@ use std::{
     time::SystemTime,
 };
 
+use glob_match::glob_match;
+
 #[derive(Clone, Debug)]
 pub enum StreamOption {
     Block(u64),
@@ -56,6 +58,12 @@ pub struct Error {
     error: DataStoreError,
 }
 
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
 impl Error {
     fn from(t: DataStoreError) -> Self {
         Error { error: t }
@@ -67,6 +75,8 @@ impl fmt::Display for Error {
         write!(f, "{}", self.error)
     }
 }
+
+impl std::error::Error for Error {}
 
 pub enum DataStoreError {
     LockError,
@@ -109,6 +119,18 @@ impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<StringKey, Value>>
 
 impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>>>> for Error {
     fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<StringKey, Value>>>) -> Self {
+        Error::from(DataStoreError::LockError)
+    }
+}
+
+impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<String, u128>>>> for Error {
+    fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<String, u128>>>) -> Self {
+        Error::from(DataStoreError::LockError)
+    }
+}
+
+impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<String, u128>>>> for Error {
+    fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<String, u128>>>) -> Self {
         Error::from(DataStoreError::LockError)
     }
 }
@@ -158,6 +180,16 @@ impl DataStore {
             expires: sync::RwLock::new(HashMap::new()),
             channels: sync::RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn keys(&self, query: &str) -> Result<Vec<String>, Error> {
+        let data = self.data.read()?;
+        let keys = data
+            .keys()
+            .filter(|k| glob_match(query, k))
+            .cloned()
+            .collect::<Vec<String>>();
+        Ok(keys)
     }
 
     pub fn xread(
@@ -341,7 +373,7 @@ impl DataStore {
         Ok(Some(incr))
     }
 
-    fn set_expire(&self, key: &str, expire_time_millis: u128) -> Result<(), Error> {
+    pub fn set_expire(&self, key: &str, expire_time_millis: u128) -> Result<(), Error> {
         self.expires
             .write()
             .unwrap()
@@ -599,6 +631,15 @@ impl DataStore {
         }
     }
 
+    pub fn iter(&self) -> Result<DataStoreIter, Error> {
+        let data = self.data.read()?;
+        let expires = self.expires.read()?;
+        Ok(DataStoreIter {
+            data: data.clone(),
+            expires: expires.clone(),
+        })
+    }
+
     pub fn cleanup(&self) {
         let expired_keys: Vec<String>;
         let now = std::time::SystemTime::now()
@@ -764,6 +805,21 @@ impl DataStore {
             }
             Err(_) => Err(Error::from(DataStoreError::LockError)),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct DataStoreIter {
+    pub data: HashMap<StringKey, Value>,
+    pub expires: HashMap<StringKey, u128>,
+}
+
+impl DataStoreIter {
+    pub fn iter(&self) -> impl Iterator<Item = (&StringKey, &Value, Option<u128>)> {
+        self.data.iter().map(|(k, v)| {
+            let expiry = self.expires.get(k).copied();
+            (k, v, expiry)
+        })
     }
 }
 

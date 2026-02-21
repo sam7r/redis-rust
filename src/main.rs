@@ -15,6 +15,7 @@ mod args;
 mod command;
 mod config;
 mod governor;
+mod persistence;
 mod resp;
 mod store;
 
@@ -54,6 +55,10 @@ fn main() {
     match governor_instance {
         GovernorInstance::Master(ref mut master_gov) => {
             master_gov.start_expire_manager();
+            master_gov.load_rdb_from_file().unwrap_or_else(|err| {
+                eprintln!("error loading RDB data: {}", err);
+                std::process::exit(1);
+            });
         }
         GovernorInstance::Slave(ref mut slave_gov) => {
             if let Some(Value::Single(master_addr)) = config.replica_of {
@@ -260,11 +265,39 @@ fn handle_cmd(
         return resp;
     }
 
+    if let Command::BgSave = command {
+        let mut resp = RespBuilder::new();
+        match governor.bgsave() {
+            Ok(msg) => {
+                resp.add_simple_string(&msg);
+            }
+            Err(err) => {
+                resp.add_simple_error(err.to_string().as_str());
+            }
+        }
+        return resp;
+    }
+
     perform_command(store, command, mode)
 }
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::Keys(query) => match store.keys(&query) {
+            Ok(keys) => {
+                let mut resp = RespBuilder::new();
+                resp.add_array(&keys.len());
+                keys.iter().for_each(|key| {
+                    resp.add_bulk_string(key);
+                });
+                resp
+            }
+            Err(err) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
+            }
+        },
         Command::Multi => {
             *mode = Mode::Transaction;
             let mut resp = RespBuilder::new();
@@ -591,6 +624,11 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
         Command::ConfigGet(_) => {
             let mut resp = RespBuilder::new();
             resp.add_simple_error("ERR CONFIG not handled");
+            resp
+        }
+        Command::BgSave => {
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error("ERR BGSAVE not handled");
             resp
         }
     }

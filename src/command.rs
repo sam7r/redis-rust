@@ -13,6 +13,8 @@ pub enum Command {
     Wait(u8, u64),
     ConfigGet(Vec<String>),
     // store
+    BgSave,
+    Keys(String),
     Type(StringKey),
     // string
     Set(StringKey, String, Vec<SetOption>),
@@ -262,6 +264,14 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             }
                             _ => None,
                         }
+                    } else {
+                        None
+                    }
+                }
+                "BGSAVE" => Some(Command::BgSave),
+                "KEYS" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Keys(command_parts[1].to_string()))
                     } else {
                         None
                     }
@@ -625,6 +635,15 @@ pub fn serialize_command(command: Command) -> String {
             }
             resp.to_string()
         }
+        Command::BgSave => RespBuilder::new()
+            .add_array(&1)
+            .add_bulk_string("BGSAVE")
+            .to_string(),
+        Command::Keys(query) => RespBuilder::new()
+            .add_array(&2)
+            .add_bulk_string("KEYS")
+            .add_bulk_string(&query)
+            .to_string(),
     }
 }
 

@@ -1,5 +1,7 @@
 use std::{
+    fs,
     io::{Read, Write},
+    path::Path,
     sync::{Arc, RwLock},
     thread, time,
 };
@@ -10,6 +12,7 @@ use crate::{
         error::GovError,
         types::{Config, ExpireStrategy, Info, Psync},
     },
+    persistence::{decoder::RdbDecoder, types::Expiry},
     resp::RespBuilder,
     store::{DataStore, Event},
 };
@@ -18,6 +21,55 @@ pub trait Governor {
     fn get_info(&self, options: Vec<Info>) -> Result<Vec<(String, String)>, GovError>;
     fn get_datastore(&self) -> Arc<DataStore>;
     fn get_expire_strategy(&self) -> Option<ExpireStrategy>;
+
+    fn load_rdb_data(&self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = RdbDecoder::new(data);
+        let rdb = decoder.parse()?;
+        let datastore = self.get_datastore();
+
+        println!("Loading RDB data: version {}", rdb.version);
+        for db in rdb.databases {
+            println!("Loading database {}", db.db_number);
+            for entry in db.entries {
+                let key = String::from_utf8_lossy(&entry.key).to_string();
+                if let Some(expiry) = entry.expiry {
+                    let expiry_millis: u128 = match expiry {
+                        Expiry::Seconds(s) => (s as u128) * 1000,
+                        Expiry::Milliseconds(ms) => ms as u128,
+                    };
+                    datastore
+                        .set_expire(&key, expiry_millis)
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                }
+                match entry.value {
+                    crate::persistence::types::Value::String(v) => {
+                        let value = String::from_utf8_lossy(&v).to_string();
+                        datastore
+                            .set(&key, value, vec![])
+                            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                        println!("  Set string key: {}", key);
+                    }
+                    crate::persistence::types::Value::List(items) => {
+                        let values: Vec<String> = items
+                            .iter()
+                            .map(|v| String::from_utf8_lossy(v).to_string())
+                            .collect();
+                        datastore
+                            .push(&key, values, false)
+                            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                        println!("  Set list key: {}", key);
+                    }
+                    crate::persistence::types::Value::Stream(_) => {
+                        // Streams not fully supported yet
+                        println!("  Skipping stream key: {}", key);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        println!("RDB data loaded successfully");
+        Ok(())
+    }
 
     fn start_expire_manager(&mut self) {
         match self.get_expire_strategy() {
@@ -126,6 +178,29 @@ pub trait Master: Governor {
     fn get_config(&self) -> Config;
     fn propagate_command(&self, command: command::Command);
     fn confirm_replica_ack(&self, repl_count: u8, wait_time: u64) -> Result<Option<u8>, GovError>;
+    fn bgsave(&self) -> Result<String, Box<dyn std::error::Error>>;
+
+    fn load_rdb_from_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let config = self.get_config();
+        if fs::create_dir_all(&config.db_directory).is_err() {
+            println!(
+                "Failed to create db directory '{}', proceeding with loading if file exists",
+                config.db_directory
+            );
+        }
+
+        let path = Path::new(&config.db_directory).join(&config.db_filename);
+        if !path.exists() {
+            println!(
+                "RDB file '{}' not found, skipping RDB loading",
+                path.to_string_lossy()
+            );
+            return Ok(());
+        }
+
+        let data = std::fs::read(path)?;
+        self.load_rdb_data(&data)
+    }
 
     fn handle_psync(
         &self,

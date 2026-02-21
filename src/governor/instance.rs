@@ -15,6 +15,13 @@ pub enum GovernorInstance {
 }
 
 impl Governor for GovernorInstance {
+    fn load_rdb_data(&self, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            GovernorInstance::Master(m) => m.load_rdb_data(data),
+            GovernorInstance::Slave(s) => s.load_rdb_data(data),
+        }
+    }
+
     fn get_datastore(&self) -> std::sync::Arc<DataStore> {
         match self {
             GovernorInstance::Master(m) => m.get_datastore(),
@@ -61,6 +68,25 @@ impl Master for GovernorInstance {
             GovernorInstance::Slave(_) => Config::default(),
         }
     }
+
+    fn load_rdb_from_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            GovernorInstance::Master(m) => m.load_rdb_from_file(),
+            GovernorInstance::Slave(_) => Err(Box::new(GovError {
+                message: "load_rdb_from_file not available on slave".to_string(),
+            })),
+        }
+    }
+
+    fn bgsave(&self) -> Result<String, Box<dyn std::error::Error>> {
+        match self {
+            GovernorInstance::Master(m) => m.bgsave(),
+            GovernorInstance::Slave(_) => Err(Box::new(GovError {
+                message: "BGSAVE not available on slave".to_string(),
+            })),
+        }
+    }
+
     fn confirm_replica_ack(&self, repl_count: u8, wait_time: u64) -> Result<Option<u8>, GovError> {
         match self {
             GovernorInstance::Master(m) => m.confirm_replica_ack(repl_count, wait_time),

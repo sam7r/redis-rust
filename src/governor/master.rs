@@ -1,6 +1,8 @@
 use rand::{RngExt, distr::Alphanumeric};
 use std::{
+    fs,
     io::{Read, Write},
+    path::Path,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -14,6 +16,8 @@ use crate::governor::{
     traits::{Governor, Master},
     types::{Config, ExpireStrategy, Info, Psync, ReplicaOffsetState},
 };
+use crate::persistence::encoder::RdbEncoder;
+use crate::persistence::types::ValueType;
 use crate::resp::RespBuilder;
 use crate::store::DataStore;
 
@@ -69,25 +73,59 @@ impl MasterGovernor {
     }
 
     fn build_rdb_file(&self) -> Vec<u8> {
-        // Placeholder for RDB file generation logic
-        let empty_rdb: Vec<u8> = vec![
-            0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, // REDIS0011
-            0xfa, 0x09, 0x72, 0x65, 0x64, 0x69, 0x73, 0x2d, 0x76, 0x65, 0x72, // redis-ver
-            0x05, 0x37, 0x2e, 0x32, 0x2e, 0x30, // 7.2.0
-            0xfa, 0x0a, 0x72, 0x65, 0x64, 0x69, 0x73, 0x2d, 0x62, 0x69, 0x74,
-            0x73, // redis-bits
-            0xc0, 0x40, // 64
-            0xfa, 0x05, 0x63, 0x74, 0x69, 0x6d, 0x65, // ctime
-            0xc2, 0x6d, 0x08, 0xbc, 0x65, // timestamp
-            0xfa, 0x08, 0x75, 0x73, 0x65, 0x64, 0x2d, 0x6d, 0x65, 0x6d, // used-mem
-            0xc2, 0xb0, 0xc4, 0x10, 0x00, // memory
-            0xfa, 0x08, 0x61, 0x6f, 0x66, 0x2d, 0x62, 0x61, 0x73, 0x65, // aof-base
-            0xc0, 0x00, // 0
-            0xff, // EOF
-            0xf0, 0x6e, 0x3b, 0xfe, 0xc0, 0xff, 0x5a, 0xa2, // checksum
-        ];
+        let mut encoder = RdbEncoder::new();
 
-        empty_rdb
+        encoder
+            .write_header(7)
+            .write_aux("redis-ver", "7.2.0")
+            .write_aux_with_int("redis-bits", 64);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        encoder.write_aux_with_int("ctime", now);
+        encoder.write_aux_with_int("used-mem", 0);
+        encoder.write_aux_with_int("aof-base", 0);
+
+        encoder.write_select_db(0);
+
+        if let Ok(iter) = self.datastore.iter() {
+            let hash_size = iter.data.len();
+            let expires_size = iter.expires.len();
+            encoder.write_resizedb(hash_size, expires_size);
+
+            for (key, value, expiry) in iter.iter() {
+                if let Some(expire_time) = expiry {
+                    let expire_seconds = expire_time / 1000;
+                    encoder.write_expire_seconds(expire_seconds as u32);
+                }
+
+                match value {
+                    crate::store::Value::String(s) => {
+                        encoder.write_value_type(ValueType::String);
+                        encoder.write_string(key);
+                        encoder.write_string(s);
+                    }
+                    crate::store::Value::List(list) => {
+                        encoder.write_value_type(ValueType::List);
+                        encoder.write_string(key);
+                        encoder.write_length(list.len());
+                        for item in list {
+                            encoder.write_string(item);
+                        }
+                    }
+                    crate::store::Value::Stream(_) => {
+                        // Streams are type 14 (QuickList), skip for now
+                    }
+                }
+            }
+        }
+
+        encoder.write_eof();
+        encoder.write_checksum(0);
+
+        encoder.finish().to_vec()
     }
 
     pub fn register_replica_instance(&self, stream: Arc<Mutex<std::net::TcpStream>>) {
@@ -168,6 +206,25 @@ impl Master for MasterGovernor {
             db_filename: self.db_filename.clone(),
             db_directory: self.db_directory.clone(),
         }
+    }
+
+    fn bgsave(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let db_directory = self.db_directory.clone();
+        let db_filename = self.db_filename.clone();
+
+        thread::scope(|s| {
+            s.spawn(move || {
+                let data = self.build_rdb_file();
+                let path = Path::new(&db_directory).join(&db_filename);
+                if let Err(e) = fs::write(&path, data) {
+                    eprintln!("BGSAVE failed: {}", e);
+                } else {
+                    println!("BGSAVE completed: {:?}", path);
+                }
+            });
+        });
+
+        Ok("Background saving started".to_string())
     }
 
     fn confirm_replica_ack(

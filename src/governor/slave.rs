@@ -134,6 +134,7 @@ impl SlaveGovernor {
             let mut rdb_data = vec![0u8; size];
             stream.read_exact(&mut rdb_data)?;
             println!("Received RDB data: {} bytes", rdb_data.len());
+            self.load_rdb_data(&rdb_data)?;
         }
 
         Ok(())
