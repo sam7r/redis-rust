@@ -327,20 +327,8 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                         None
                     }
                 }
-                "RESET" => {
-                    if command_parts.len() >= 2 {
-                        Some(Command::Reset)
-                    } else {
-                        None
-                    }
-                }
-                "QUIT" => {
-                    if command_parts.len() >= 2 {
-                        Some(Command::Quit)
-                    } else {
-                        None
-                    }
-                }
+                "RESET" => Some(Command::Reset),
+                "QUIT" => Some(Command::Quit),
 
                 _ => None,
             }

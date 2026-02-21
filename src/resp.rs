@@ -78,6 +78,13 @@ impl RespBuilder {
         self
     }
 
+    pub fn empty_bulk_string(&mut self) -> &mut Self {
+        self.data.push(DataType::BulkString.to_char());
+        self.data.push_str("0\r\n");
+        self.data.push_str("\r\n");
+        self
+    }
+
     pub fn add_integer(&mut self, value: &str) -> &mut Self {
         self.data.push(DataType::Integer.to_char());
         self.data.push_str(value);

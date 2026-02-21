@@ -369,9 +369,18 @@ fn process_subscribe_cmd(
             resp.add_integer(&(subs.to_string()));
             resp
         }
-        _ => {
+        Command::Ping => {
             let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR Can't execute 'echo': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context");
+            resp.add_array(&2);
+            resp.add_simple_string("PONG");
+            resp.empty_bulk_string();
+            resp
+        }
+        command => {
+            let raw = command::serialize_command(command);
+            let cmd = raw.split_whitespace().nth(2).unwrap();
+            let mut resp = RespBuilder::new();
+            resp.add_simple_error(&format!("ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context", &cmd.to_lowercase()));
             resp
         }
     }
