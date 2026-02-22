@@ -1,4 +1,4 @@
-use crate::data::types::SortedRangeOption;
+use crate::data::types::{GeoUnit, SortedRangeOption};
 
 use super::data::types::{AddOption, SetOption, StreamKey, StreamOption, StringKey};
 use super::governor::types::Info;
@@ -82,6 +82,7 @@ pub enum Command {
     Zrem(StringKey, Vec<StringKey>),
     GeoAdd(StringKey, Vec<AddOption>, Vec<(f64, f64, StringKey)>),
     GeoPos(StringKey, Vec<StringKey>),
+    GeoDist(StringKey, String, String, GeoUnit),
     // transaction
     Multi,
     Exec,
@@ -139,6 +140,7 @@ impl Command {
             Command::Zrem(_, _) => "ZREM",
             Command::GeoAdd(_, _, _) => "GEOADD",
             Command::GeoPos(_, _) => "GEOPOS",
+            Command::GeoDist(_, _, _, _) => "GEODIST",
         }
     }
 
@@ -361,6 +363,11 @@ impl Command {
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
             Command::GeoPos(_, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::GeoDist(_, _, _, _) => CommandAcl {
                 client_context: ClientContext::Any,
                 command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
@@ -811,6 +818,27 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             .map(|&m| StringKey::from(m))
                             .collect();
                         Some(Command::GeoPos(key, members))
+                    } else {
+                        None
+                    }
+                }
+                "GEODIST" => {
+                    if command_parts.len() >= 4 {
+                        let key = StringKey::from(command_parts[1]);
+                        let member1 = StringKey::from(command_parts[2]);
+                        let member2 = StringKey::from(command_parts[3]);
+                        let unit = if let Some(unit_str) = command_parts.get(4) {
+                            match unit_str.to_uppercase().as_str() {
+                                "M" => GeoUnit::M,
+                                "KM" => GeoUnit::KM,
+                                "MI" => GeoUnit::MI,
+                                "FT" => GeoUnit::FT,
+                                _ => GeoUnit::M,
+                            }
+                        } else {
+                            GeoUnit::M
+                        };
+                        Some(Command::GeoDist(key, member1, member2, unit))
                     } else {
                         None
                     }

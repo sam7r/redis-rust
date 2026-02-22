@@ -557,6 +557,24 @@ fn process_normal_cmd(
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::GeoDist(key, member1, member2, unit) => {
+            match store.geodist(&key, &member1, &member2, unit) {
+                Ok(result) => {
+                    let mut resp = RespBuilder::new();
+                    if let Some(distance) = result {
+                        resp.add_bulk_string(&distance.to_string());
+                    } else {
+                        resp.negative_bulk_string();
+                    }
+                    resp
+                }
+                Err(err) => {
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error(err.to_string().as_str());
+                    resp
+                }
+            }
+        }
         Command::GeoPos(key, members) => match store.geopos(&key, members.clone()) {
             Ok(result) => {
                 let mut resp = RespBuilder::new();

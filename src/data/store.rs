@@ -9,8 +9,8 @@ use crate::data::{
     errors::{DataStoreError, Error},
     geo,
     types::{
-        AddOption, Event, Score, SetOption, SortedRangeOption, StreamEntry, StreamKey,
-        StreamOption, StringKey, Subscribers, Value,
+        AddOption, Event, GeoPositions, GeoUnit, Score, SetOption, SortedRangeOption, StreamEntry,
+        StreamKey, StreamOption, StringKey, Subscribers, Value,
     },
     utils::{create_subscriber_id, parse_entry_id_add, parse_entry_id_query, value_type_as_str},
 };
@@ -32,11 +32,34 @@ impl DataStore {
 }
 
 impl DataStore {
-    pub fn geopos(
+    pub fn geodist(
         &self,
         key: &str,
-        members: Vec<String>,
-    ) -> Result<Option<Vec<Option<(f64, f64)>>>, Error> {
+        member1: &str,
+        member2: &str,
+        unit: GeoUnit,
+    ) -> Result<Option<f64>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => {
+                let score1_opt = set.iter().find(|(_, m)| *m == member1).map(|(s, _)| s);
+                let score2_opt = set.iter().find(|(_, m)| *m == member2).map(|(s, _)| s);
+                if let (Some(score1), Some(score2)) = (score1_opt, score2_opt) {
+                    let coord1 = geo::decode(score1.get_score() as u64);
+                    let coord2 = geo::decode(score2.get_score() as u64);
+                    let distance = geo::haversine_distance(&coord1, &coord2, unit);
+                    Ok(Some(distance))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(_) | None => Ok(None),
+        }
+    }
+    pub fn geopos(&self, key: &str, members: Vec<String>) -> Result<Option<GeoPositions>, Error> {
         let data = self
             .data
             .read()

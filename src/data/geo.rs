@@ -1,3 +1,5 @@
+use crate::data::types::GeoUnit;
+
 const MIN_LATITUDE: f64 = -85.05112878;
 const MAX_LATITUDE: f64 = 85.05112878;
 const MIN_LONGITUDE: f64 = -180.0;
@@ -99,4 +101,21 @@ pub fn decode(geo_code: u64) -> Coordinates {
     let grid_longitude_number = compact_int64_to_int32(y);
 
     convert_grid_numbers_to_coordinates(grid_latitude_number, grid_longitude_number)
+}
+
+pub fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates, unit: GeoUnit) -> f64 {
+    let lat1_rad = coord1.latitude.to_radians();
+    let lat2_rad = coord2.latitude.to_radians();
+    let delta_lat = (coord2.latitude - coord1.latitude).to_radians();
+    let delta_lon = (coord2.longitude - coord1.longitude).to_radians();
+
+    let v = (delta_lat / 2.0).sin().powi(2)
+        + lat1_rad.cos() * lat2_rad.cos() * (delta_lon / 2.0).sin().powi(2);
+
+    match unit {
+        GeoUnit::M => 6372797.560856 * 2.0 * v.sqrt().asin(),
+        GeoUnit::KM => 6372.79756085 * 2.0 * v.sqrt().asin(),
+        GeoUnit::MI => 3959.87281827 * 2.0 * v.sqrt().asin(),
+        GeoUnit::FT => 20908128.480498 * 2.0 * v.sqrt().asin(),
+    }
 }

@@ -9,6 +9,7 @@ pub type StreamKey = String;
 pub type StreamEntryId = (u128, usize);
 pub type StreamEntry = BTreeMap<StreamEntryId, Vec<(String, String)>>;
 pub type SortedSet = BTreeMap<Score, String>;
+pub type GeoPositions = Vec<Option<(f64, f64)>>;
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct Score(f64, String);
@@ -144,4 +145,12 @@ pub enum SortedRangeOption {
     REV,
     LIMIT(usize, usize),
     WITHSCORES,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GeoUnit {
+    M,
+    KM,
+    MI,
+    FT,
 }
