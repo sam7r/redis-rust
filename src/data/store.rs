@@ -58,7 +58,7 @@ impl DataStore {
                 let mut update_count = 0;
 
                 for (score, member) in &score_members {
-                    let new_score = Score::new(*score);
+                    let new_score = Score::new(*score, member.clone());
 
                     let existing_entry = set.iter().find(|(_, m)| *m == member);
                     let existing_score = existing_entry.map(|(s, _)| s.clone());
@@ -82,7 +82,7 @@ impl DataStore {
                     if has(&AddOption::INCR) {
                         if let Some(existing) = existing_score {
                             let mut incremented = existing.clone();
-                            incremented.add(*score);
+                            incremented.add_score(*score);
                             set.remove(&existing);
                             set.insert(incremented, member.clone());
                         } else {
@@ -109,13 +109,41 @@ impl DataStore {
                 let count = score_members.len();
                 let set: BTreeMap<Score, String> = score_members
                     .into_iter()
-                    .map(|(score, member)| (Score::new(score), member))
+                    .map(|(score, member)| (Score::new(score, member.clone()), member))
                     .collect();
 
                 data.insert(String::from(key), Value::SortedSet(set));
                 Ok(Some(count))
             }
             Some(_) => Ok(None),
+        }
+    }
+
+    pub fn zrank(
+        &self,
+        key: &str,
+        member: &str,
+        with_score: bool,
+    ) -> Result<Option<(usize, Option<f64>)>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => {
+                for (index, (s, m)) in set.iter().enumerate() {
+                    if m == member {
+                        let mut score = None;
+                        if with_score {
+                            score = Some(s.get_score());
+                        }
+                        return Ok(Some((index, score)));
+                    }
+                }
+                Ok(None)
+            }
+            Some(_) | None => Ok(None),
         }
     }
 }

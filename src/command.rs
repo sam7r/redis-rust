@@ -73,8 +73,7 @@ pub enum Command {
     Xread(Vec<StreamOption>),
     // sorted set
     Zadd(StringKey, Vec<AddOption>, Vec<(f64, StringKey)>),
-    // Zrange(StringKey, i64, i64),
-
+    Zrank(StringKey, StringKey, bool),
     // transaction
     Multi,
     Exec,
@@ -125,6 +124,7 @@ impl Command {
             Command::Reset => "RESET",
             Command::Quit => "QUIT",
             Command::Zadd(_, _, _) => "ZADD",
+            Command::Zrank(_, _, _) => "ZRANK",
         }
     }
 
@@ -314,6 +314,11 @@ impl Command {
             Command::Zadd(_, _, _) => CommandAcl {
                 client_context: ClientContext::Master,
                 command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Zrank(_, _, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
         }
@@ -633,6 +638,19 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             }
                         }
                         Some(Command::Zadd(key, options, score_member_pairs))
+                    } else {
+                        None
+                    }
+                }
+                "ZRANK" => {
+                    if command_parts.len() >= 3 {
+                        let key = StringKey::from(command_parts[1]);
+                        let member = StringKey::from(command_parts[2]);
+                        let with_score = command_parts
+                            .get(3)
+                            .is_some_and(|&opt| opt.to_uppercase() == "WITHSCORE");
+
+                        Some(Command::Zrank(key, member, with_score))
                     } else {
                         None
                     }

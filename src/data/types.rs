@@ -11,21 +11,28 @@ pub type StreamEntry = BTreeMap<StreamEntryId, Vec<(String, String)>>;
 pub type SortedSet = BTreeMap<Score, String>;
 
 #[derive(PartialEq, Clone, Debug)]
-pub struct Score(f64);
+pub struct Score(f64, String);
 
 impl Score {
-    pub fn new(score: f64) -> Self {
-        Score(score)
+    pub fn new(score: f64, member: String) -> Self {
+        Score(score, member)
     }
 
-    pub fn add(&mut self, delta: f64) {
+    pub fn add_score(&mut self, delta: f64) {
         self.0 += delta;
+    }
+
+    pub fn get_score(&self) -> f64 {
+        self.0
     }
 }
 
 impl Ord for Score {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| self.1.cmp(&other.1))
     }
 }
 
