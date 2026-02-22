@@ -158,7 +158,9 @@ impl DataStore {
             .data
             .read()
             .map_err(|_| Error::from(DataStoreError::LockError))?;
+
         let has = |opt: &SortedRangeOption| options.contains(opt);
+
         match data.get(key) {
             Some(Value::SortedSet(set)) => {
                 let len = set.len() as i64;
@@ -198,8 +200,28 @@ impl DataStore {
             .data
             .read()
             .map_err(|_| Error::from(DataStoreError::LockError))?;
+
         match data.get(key) {
             Some(Value::SortedSet(set)) => Ok(Some(set.len())),
+            Some(_) | None => Ok(None),
+        }
+    }
+
+    pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => {
+                for (s, m) in set.iter() {
+                    if m == member {
+                        return Ok(Some(s.get_score()));
+                    }
+                }
+                Ok(None)
+            }
             Some(_) | None => Ok(None),
         }
     }

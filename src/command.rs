@@ -78,6 +78,7 @@ pub enum Command {
     Zrank(StringKey, StringKey, bool),
     Zrange(StringKey, i64, i64, Vec<SortedRangeOption>),
     Zcard(StringKey),
+    Zscore(StringKey, StringKey),
     // transaction
     Multi,
     Exec,
@@ -131,6 +132,7 @@ impl Command {
             Command::Zrank(_, _, _) => "ZRANK",
             Command::Zrange(_, _, _, _) => "ZRANGE",
             Command::Zcard(_) => "ZCARD",
+            Command::Zscore(_, _) => "ZSCORE",
         }
     }
 
@@ -333,6 +335,11 @@ impl Command {
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
             Command::Zcard(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Zscore(_, _) => CommandAcl {
                 client_context: ClientContext::Any,
                 command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
@@ -709,6 +716,16 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                 "ZCARD" => {
                     if command_parts.len() >= 2 {
                         Some(Command::Zcard(StringKey::from(command_parts[1])))
+                    } else {
+                        None
+                    }
+                }
+                "ZSCORE" => {
+                    if command_parts.len() >= 3 {
+                        Some(Command::Zscore(
+                            StringKey::from(command_parts[1]),
+                            StringKey::from(command_parts[2]),
+                        ))
                     } else {
                         None
                     }

@@ -640,6 +640,22 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
                 resp
             }
         },
+        Command::Zscore(key, member) => match store.zscore(&key, &member) {
+            Ok(result) => {
+                let mut resp = RespBuilder::new();
+                if let Some(score) = result {
+                    resp.add_bulk_string(&score.to_string());
+                } else {
+                    resp.negative_bulk_string();
+                }
+                resp
+            }
+            Err(err) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
+            }
+        },
         Command::Keys(query) => match store.keys(&query) {
             Ok(keys) => {
                 let mut resp = RespBuilder::new();
