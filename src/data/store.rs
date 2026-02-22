@@ -85,7 +85,6 @@ impl DataStore {
                             incremented.add(*score);
                             set.remove(&existing);
                             set.insert(incremented, member.clone());
-                            update_count += 1;
                         } else {
                             set.insert(new_score, member.clone());
                             update_count += 1;
@@ -93,9 +92,10 @@ impl DataStore {
                     } else {
                         if let Some(existing) = existing_score {
                             set.remove(&existing);
+                        } else {
+                            update_count += 1;
                         }
                         set.insert(new_score, member.clone());
-                        update_count += 1;
                     }
                 }
 
