@@ -225,6 +225,29 @@ impl DataStore {
             Some(_) | None => Ok(None),
         }
     }
+
+    pub fn zrem(&self, key: &str, members: Vec<String>) -> Result<Option<usize>, Error> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+        match data.get_mut(key) {
+            Some(Value::SortedSet(set)) => {
+                let mut remove_count = 0;
+                set.retain(|_, m| {
+                    if members.contains(m) {
+                        remove_count += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+
+                Ok(Some(remove_count))
+            }
+            Some(_) | None => Ok(None),
+        }
+    }
 }
 
 /**

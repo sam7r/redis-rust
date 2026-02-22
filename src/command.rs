@@ -79,6 +79,7 @@ pub enum Command {
     Zrange(StringKey, i64, i64, Vec<SortedRangeOption>),
     Zcard(StringKey),
     Zscore(StringKey, StringKey),
+    Zrem(StringKey, Vec<StringKey>),
     // transaction
     Multi,
     Exec,
@@ -133,6 +134,7 @@ impl Command {
             Command::Zrange(_, _, _, _) => "ZRANGE",
             Command::Zcard(_) => "ZCARD",
             Command::Zscore(_, _) => "ZSCORE",
+            Command::Zrem(_, _) => "ZREM",
         }
     }
 
@@ -342,6 +344,11 @@ impl Command {
             Command::Zscore(_, _) => CommandAcl {
                 client_context: ClientContext::Any,
                 command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Zrem(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
         }
@@ -726,6 +733,18 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             StringKey::from(command_parts[1]),
                             StringKey::from(command_parts[2]),
                         ))
+                    } else {
+                        None
+                    }
+                }
+                "ZREM" => {
+                    if command_parts.len() >= 3 {
+                        let key = StringKey::from(command_parts[1]);
+                        let members = command_parts[2..]
+                            .iter()
+                            .map(|&m| StringKey::from(m))
+                            .collect();
+                        Some(Command::Zrem(key, members))
                     } else {
                         None
                     }

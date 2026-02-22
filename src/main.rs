@@ -656,6 +656,22 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
                 resp
             }
         },
+        Command::Zrem(key, members) => match store.zrem(&key, members) {
+            Ok(result) => {
+                let mut resp = RespBuilder::new();
+                if let Some(n) = result {
+                    resp.add_integer(&n.to_string());
+                } else {
+                    resp.add_integer(&0.to_string());
+                }
+                resp
+            }
+            Err(err) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
+            }
+        },
         Command::Keys(query) => match store.keys(&query) {
             Ok(keys) => {
                 let mut resp = RespBuilder::new();
