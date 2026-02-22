@@ -1,5 +1,6 @@
 use args::Value;
-use command::{Command, prepare_command};
+use command::{Command, PreparedCommand, prepare_command};
+use data::store::DataStore;
 use governor::{
     instance::GovernorInstance,
     master::MasterGovernor,
@@ -14,21 +15,20 @@ use std::{
     sync::Arc,
     thread,
 };
-use store::DataStore;
 
-use crate::message::{
-    broker::{Broker, MessageBroker},
+use message::{
+    broker::Broker,
     types::{Message, SubscriberId, TopicFilter},
 };
 
 mod args;
 mod command;
 mod config;
+mod data;
 mod governor;
 mod message;
 mod persistence;
 mod resp;
-mod store;
 
 fn main() {
     let config = config::Config::new();
@@ -111,7 +111,7 @@ fn handle_client(
     messenger: Arc<Broker>,
 ) {
     let mut mode = Mode::Normal;
-    let mut queue: Vec<Command> = Vec::new();
+    let mut queue: Vec<PreparedCommand> = Vec::new();
     let mut subscriber_id: Option<SubscriberId> = None;
 
     loop {
@@ -136,12 +136,12 @@ fn handle_client(
                 let store_gov = Arc::clone(&governor);
                 let message_broker = Arc::clone(&messenger);
 
-                if let Some(cmd) = prepare_command(&input) {
+                if let Some(prepared_cmd) = prepare_command(&input) {
                     match mode {
                         Mode::Subscribe => {
                             let resp = process_subscribe_cmd(
                                 message_broker,
-                                cmd,
+                                prepared_cmd,
                                 subscriber_id.unwrap_or(0),
                                 &mut mode,
                             );
@@ -152,20 +152,20 @@ fn handle_client(
                                 kv_store,
                                 store_gov,
                                 message_broker,
-                                cmd,
+                                prepared_cmd,
                                 &mut mode,
                                 &mut queue,
                             );
                             write_to_stream(&mut stream, resp.as_bytes());
                         }
                         Mode::Normal => {
-                            if let Command::Psync(replication_id, offset) = cmd.clone()
+                            if let Command::Psync(replication_id, offset) = prepared_cmd.cmd.clone()
                                 && let GovernorInstance::Master(master_gov) = governor.as_ref()
                             {
                                 let _ = master_gov.handle_psync(stream, &replication_id, offset);
                                 break;
                             }
-                            if let Command::Subscribe(topics) = cmd.clone() {
+                            if let Command::Subscribe(topics) = prepared_cmd.cmd.clone() {
                                 handle_new_subscriber(
                                     message_broker,
                                     &mut subscriber_id,
@@ -179,7 +179,7 @@ fn handle_client(
                                 kv_store,
                                 store_gov,
                                 message_broker,
-                                cmd,
+                                prepared_cmd.clone(),
                                 &mut mode,
                             );
                             write_to_stream(&mut stream, resp.as_bytes());
@@ -248,10 +248,11 @@ fn handle_new_subscriber(
 
 fn process_subscribe_cmd(
     messenger: Arc<Broker>,
-    command: Command,
+    prepared_cmd: PreparedCommand,
     subscriber_id: SubscriberId,
     mode: &mut Mode,
 ) -> RespBuilder {
+    let command = prepared_cmd.cmd;
     match command {
         Command::Quit => {
             *mode = Mode::Normal;
@@ -376,11 +377,9 @@ fn process_subscribe_cmd(
             resp.empty_bulk_string();
             resp
         }
-        command => {
-            let raw = command::serialize_command(command);
-            let cmd = raw.split_whitespace().nth(2).unwrap();
+        _ => {
             let mut resp = RespBuilder::new();
-            resp.add_simple_error(&format!("ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context", &cmd.to_lowercase()));
+            resp.add_simple_error(&format!("ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context", command.name()));
             resp
         }
     }
@@ -390,10 +389,11 @@ fn process_transaction_cmd(
     store: Arc<DataStore>,
     governor: Arc<GovernorInstance>,
     messenger: Arc<Broker>,
-    command: Command,
+    prepared_cmd: PreparedCommand,
     mode: &mut Mode,
-    queue: &mut Vec<Command>,
+    queue: &mut Vec<PreparedCommand>,
 ) -> RespBuilder {
+    let command = prepared_cmd.cmd.clone();
     match command {
         Command::Discard => {
             queue.clear();
@@ -405,12 +405,12 @@ fn process_transaction_cmd(
         Command::Exec => {
             let mut resp = RespBuilder::new();
             resp.add_array(&queue.len());
-            for cmd in queue.iter() {
+            for queued_cmd in queue.iter() {
                 let cmd_resp = process_normal_cmd(
                     store.clone(),
                     governor.clone(),
                     messenger.clone(),
-                    cmd.clone(),
+                    queued_cmd.clone(),
                     mode,
                 );
                 resp.join(&cmd_resp.to_string());
@@ -420,7 +420,7 @@ fn process_transaction_cmd(
             resp
         }
         _ => {
-            queue.push(command);
+            queue.push(prepared_cmd);
             let mut resp = RespBuilder::new();
             resp.add_simple_string("QUEUED");
             resp
@@ -432,11 +432,13 @@ fn process_normal_cmd(
     store: Arc<DataStore>,
     governor: Arc<GovernorInstance>,
     messenger: Arc<Broker>,
-    command: Command,
+    prepared_cmd: PreparedCommand,
     mode: &mut Mode,
 ) -> RespBuilder {
+    let command = prepared_cmd.cmd.clone();
+
     if let GovernorInstance::Master(master_gov) = governor.as_ref() {
-        master_gov.propagate_command(command.clone());
+        master_gov.propagate_command(prepared_cmd);
     }
 
     if let Command::Publish(topic, payload) = command {
@@ -553,6 +555,24 @@ fn process_normal_cmd(
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::Zadd(key, options, member_scores) => {
+            match store.zadd(&key, options, member_scores) {
+                Ok(result) => {
+                    let mut resp = RespBuilder::new();
+                    if let Some(n) = result {
+                        resp.add_integer(&n.to_string());
+                    } else {
+                        resp.add_simple_string("OK");
+                    }
+                    resp
+                }
+                Err(err) => {
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error(err.to_string().as_str());
+                    resp
+                }
+            }
+        }
         Command::Keys(query) => match store.keys(&query) {
             Ok(keys) => {
                 let mut resp = RespBuilder::new();
@@ -866,24 +886,15 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
                 resp
             }
         },
-        Command::Psync(_, _) => {
-            let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR unhandled PSYNC request");
-            resp
-        }
-        Command::Wait(_, _) => {
-            let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR unhandled WAIT request");
-            resp
-        }
         Command::ReplConf(_, _) | Command::Info(_) => {
             let mut resp = RespBuilder::new();
             resp.add_simple_string("OK");
             resp
         }
-        Command::Discard => {
+        Command::Reset => {
+            *mode = Mode::Normal;
             let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR DISCARD without MULTI");
+            resp.add_simple_error("OK");
             resp
         }
         Command::Exec => {
@@ -891,30 +902,20 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
             resp.add_simple_error("ERR EXEC without MULTI");
             resp
         }
-        Command::ConfigGet(_) => {
+        Command::Discard => {
             let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR CONFIG not handled");
+            resp.add_simple_error("ERR DISCARD without MULTI");
             resp
         }
-        Command::BgSave => {
+        _ => {
             let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR BGSAVE not handled");
-            resp
-        }
-        Command::Publish(_, _)
-        | Command::Subscribe(_)
-        | Command::Quit
-        | Command::Psubscribe(_)
-        | Command::Unsubscribe(_)
-        | Command::Punsubscribe(_) => {
-            let mut resp = RespBuilder::new();
-            resp.add_simple_error("ERR unhandled subscription command");
-            resp
-        }
-        Command::Reset => {
-            *mode = Mode::Normal;
-            let mut resp = RespBuilder::new();
-            resp.add_simple_error("OK");
+            resp.add_simple_error(
+                format!(
+                    "ERR Unsupported command '{}' in current context",
+                    command.name()
+                )
+                .as_str(),
+            );
             resp
         }
     }

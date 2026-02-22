@@ -1,12 +1,12 @@
 use crate::{
     command,
+    data::store::DataStore,
     governor::{
         error::GovError,
         traits::{Governor, Slave},
         types::{ExpireStrategy, Info},
     },
     resp::RespBuilder,
-    store::DataStore,
 };
 
 use std::{
@@ -134,7 +134,17 @@ impl SlaveGovernor {
             let mut rdb_data = vec![0u8; size];
             stream.read_exact(&mut rdb_data)?;
             println!("Received RDB data: {} bytes", rdb_data.len());
+
             self.load_rdb_data(&rdb_data)?;
+
+            let offset = response_line
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or("0")
+                .parse::<u64>()
+                .unwrap_or(0);
+
+            self.repl_offset.store(offset, Ordering::SeqCst);
         }
 
         Ok(())
@@ -143,8 +153,8 @@ impl SlaveGovernor {
     pub fn handle_incoming(&self, input: &str) -> Option<RespBuilder> {
         let mut mode = crate::Mode::Normal;
         let c = command::prepare_commands(input);
-        for (cmd, size) in c {
-            if let Some(command::Command::ReplConf(arg, _)) = cmd.clone()
+        for prepared_cmd in c.into_iter().flatten() {
+            if let command::Command::ReplConf(arg, _) = prepared_cmd.cmd.clone()
                 && arg == "GETACK"
             {
                 let mut resp = RespBuilder::new();
@@ -153,22 +163,30 @@ impl SlaveGovernor {
                     .add_bulk_string("ACK")
                     .add_bulk_string(self.repl_offset.load(Ordering::SeqCst).to_string().as_str());
 
-                let prev = self.repl_offset.fetch_add(size as u64, Ordering::SeqCst);
+                let prev = self
+                    .repl_offset
+                    .fetch_add(prepared_cmd.raw.len() as u64, Ordering::SeqCst);
+
                 println!(
                     "Processed command from master, updated replication offset: {} -> {}",
                     prev,
-                    prev + size as u64
+                    prev + prepared_cmd.raw.len() as u64
                 );
 
                 return Some(resp);
-            } else if let Some(cmd) = cmd.clone() {
-                let _ = crate::perform_command(self.datastore.clone(), cmd.clone(), &mut mode);
-
-                let prev = self.repl_offset.fetch_add(size as u64, Ordering::SeqCst);
+            } else {
+                let _ = crate::perform_command(
+                    self.datastore.clone(),
+                    prepared_cmd.cmd.clone(),
+                    &mut mode,
+                );
+                let prev = self
+                    .repl_offset
+                    .fetch_add(prepared_cmd.raw.len() as u64, Ordering::SeqCst);
                 println!(
                     "Processed command from master, updated replication offset: {} -> {}",
                     prev,
-                    prev + size as u64
+                    prev + prepared_cmd.raw.len() as u64
                 );
             }
         }

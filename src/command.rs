@@ -1,8 +1,48 @@
+use super::data::types::{AddOption, SetOption, StreamKey, StreamOption, StringKey};
 use super::governor::types::Info;
-use super::resp::{DataType, RespBuilder, RespParser};
-use super::store::{SetOption, StreamKey, StreamOption, StringKey};
+use super::resp::{DataType, RespParser};
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct PreparedCommand {
+    pub cmd: Command,
+    pub raw: String,
+    pub acl: CommandAcl,
+}
+
+impl PreparedCommand {}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct CommandAcl {
+    pub client_context: ClientContext,
+    pub command_type: CommandType,
+    pub modes: Vec<CommandMode>,
+}
+
+#[derive(Clone)]
+pub enum ClientContext {
+    Master,
+    Replica,
+    Any,
+}
+
+#[derive(Clone)]
+pub enum CommandType {
+    Read,
+    Write,
+    Admin,
+}
+
+#[derive(Clone)]
+pub enum CommandMode {
+    Normal,
+    Multi,
+    PubSub,
+}
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Command {
     // server
     Ping,
@@ -31,6 +71,10 @@ pub enum Command {
     Xadd(StreamKey, StringKey, Vec<(String, String)>),
     Xrange(StreamKey, StringKey, StringKey),
     Xread(Vec<StreamOption>),
+    // sorted set
+    Zadd(StringKey, Vec<AddOption>, Vec<(f64, StringKey)>),
+    // Zrange(StringKey, i64, i64),
+
     // transaction
     Multi,
     Exec,
@@ -45,22 +89,263 @@ pub enum Command {
     Quit,
 }
 
-pub fn prepare_commands(data: &str) -> Vec<(Option<Command>, usize)> {
+impl Command {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Command::Ping => "PING",
+            Command::Echo(_) => "ECHO",
+            Command::Info(_) => "INFO",
+            Command::ReplConf(_, _) => "REPLCONF",
+            Command::Psync(_, _) => "PSYNC",
+            Command::Wait(_, _) => "WAIT",
+            Command::ConfigGet(_) => "CONFIG",
+            Command::BgSave => "BGSAVE",
+            Command::Keys(_) => "KEYS",
+            Command::Type(_) => "TYPE",
+            Command::Set(_, _, _) => "SET",
+            Command::Get(_) => "GET",
+            Command::Incr(_) => "INCR",
+            Command::Rpush(_, _) => "RPUSH",
+            Command::Lpush(_, _) => "LPUSH",
+            Command::Lrange(_, _, _) => "LRANGE",
+            Command::Llen(_) => "LLEN",
+            Command::Lpop(_, _) => "LPOP",
+            Command::Blpop(_, _) => "BLPOP",
+            Command::Xadd(_, _, _) => "XADD",
+            Command::Xrange(_, _, _) => "XRANGE",
+            Command::Xread(_) => "XREAD",
+            Command::Multi => "MULTI",
+            Command::Exec => "EXEC",
+            Command::Discard => "DISCARD",
+            Command::Publish(_, _) => "PUBLISH",
+            Command::Subscribe(_) => "SUBSCRIBE",
+            Command::Psubscribe(_) => "PSUBSCRIBE",
+            Command::Unsubscribe(_) => "UNSUBSCRIBE",
+            Command::Punsubscribe(_) => "PUNSUBSCRIBE",
+            Command::Reset => "RESET",
+            Command::Quit => "QUIT",
+            Command::Zadd(_, _, _) => "ZADD",
+        }
+    }
+
+    pub fn should_replicate(&self) -> bool {
+        matches!(self.acl().command_type, CommandType::Write)
+    }
+
+    pub fn acl(&self) -> CommandAcl {
+        match self {
+            // Read commands - valid in all contexts
+            Command::Ping => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi, CommandMode::PubSub],
+            },
+            Command::Quit => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi, CommandMode::PubSub],
+            },
+            Command::Reset => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::PubSub],
+            },
+
+            // Server commands
+            Command::Echo(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Info(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::ReplConf(_, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::Psync(_, _) => CommandAcl {
+                client_context: ClientContext::Replica,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::Wait(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::ConfigGet(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::BgSave => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Admin,
+                modes: vec![CommandMode::Normal],
+            },
+
+            // Store commands
+            Command::Keys(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Type(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+
+            // String commands
+            Command::Set(_, _, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Get(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Incr(_) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+
+            // List commands
+            Command::Rpush(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Lpush(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Lrange(_, _, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Llen(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Lpop(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Blpop(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal],
+            },
+
+            // Stream commands
+            Command::Xadd(_, _, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Xrange(_, _, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Xread(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+
+            // Transaction commands
+            Command::Multi => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::Exec => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Multi],
+            },
+            Command::Discard => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Multi],
+            },
+
+            // Pub/Sub commands
+            Command::Publish(_, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::Subscribe(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::Psubscribe(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal],
+            },
+            Command::Unsubscribe(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::PubSub],
+            },
+            Command::Punsubscribe(_) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::PubSub],
+            },
+
+            // sorted set commands
+            Command::Zadd(_, _, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+        }
+    }
+}
+
+pub fn prepare_commands(data: &str) -> Vec<Option<PreparedCommand>> {
     let mut commands = Vec::new();
     let mut parser = RespParser::new(data);
-    let mut prev_cursor = 0;
 
     while parser.cursor < parser.data.len() {
+        let start = parser.cursor;
         let cmd = prepare_command_with_parser(&mut parser);
-        let size = parser.cursor - prev_cursor;
-        commands.push((cmd, size));
-        prev_cursor = parser.cursor;
+        let raw = data[start..parser.cursor].to_string();
+
+        let prepared = cmd.map(|c| {
+            let acl = c.acl();
+            PreparedCommand { cmd: c, raw, acl }
+        });
+
+        commands.push(prepared);
     }
     commands
 }
 
-pub fn prepare_command(data: &str) -> Option<Command> {
-    prepare_command_with_parser(&mut RespParser::new(data))
+pub fn prepare_command(data: &str) -> Option<PreparedCommand> {
+    let mut parser = RespParser::new(data);
+    let cmd = prepare_command_with_parser(&mut parser)?;
+    let raw = data[..parser.cursor].to_string();
+    let acl = cmd.acl();
+
+    Some(PreparedCommand { cmd, raw, acl })
 }
 
 pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
@@ -329,6 +614,29 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                 }
                 "RESET" => Some(Command::Reset),
                 "QUIT" => Some(Command::Quit),
+                "ZADD" => {
+                    if command_parts.len() >= 3 {
+                        let key = StringKey::from(command_parts[1]);
+                        let mut options = Vec::new();
+                        let mut score_member_pairs = Vec::new();
+                        if command_parts.len() > 3 {
+                            options = prepare_add_options(command_parts[2..].to_vec());
+                        }
+                        for i in ((2 + options.len())..command_parts.len()).step_by(2) {
+                            if let Some(score_str) = command_parts.get(i)
+                                && let Some(member_str) = command_parts.get(i + 1)
+                                && let Ok(score) = score_str.parse::<f64>()
+                            {
+                                score_member_pairs.push((score, member_str.to_string()));
+                            } else {
+                                return None; // Invalid score-member pair
+                            }
+                        }
+                        Some(Command::Zadd(key, options, score_member_pairs))
+                    } else {
+                        None
+                    }
+                }
 
                 _ => None,
             }
@@ -341,6 +649,27 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
             None
         }
     }
+}
+
+fn prepare_add_options(args: Vec<&str>) -> Vec<AddOption> {
+    let mut options = Vec::new();
+    if args.is_empty() {
+        return options;
+    }
+    let mut iter = args.iter();
+    while let Some(opt) = iter.next() {
+        let upper_opt = opt.to_uppercase();
+        match upper_opt.as_str() {
+            "NX" | "XX" | "GT" | "LT" | "CH" | "INCR" => {
+                if let Some(option) = AddOption::from_str(upper_opt.as_str()) {
+                    options.push(option);
+                }
+                iter.next();
+            }
+            _ => {}
+        }
+    }
+    options
 }
 
 fn prepare_stream_options(args: Vec<&str>) -> Vec<StreamOption> {
@@ -502,255 +831,6 @@ fn prepare_info_options(args: Vec<&str>) -> Vec<Info> {
     options
 }
 
-pub fn serialize_command(command: Command) -> String {
-    match command {
-        Command::Publish(chan, msg) => RespBuilder::new()
-            .add_array(&3)
-            .add_bulk_string("PUBLISH")
-            .add_bulk_string(&chan)
-            .add_bulk_string(&msg)
-            .to_string(),
-        Command::Ping => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("PING")
-            .to_string(),
-        Command::Echo(s) => RespBuilder::new()
-            .add_array(&2)
-            .add_bulk_string("ECHO")
-            .add_bulk_string(&s)
-            .to_string(),
-        Command::Info(_) => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("INFO")
-            .to_string(),
-        Command::ReplConf(arg, value) => RespBuilder::new()
-            .add_array(&3)
-            .add_bulk_string("REPLCONF")
-            .add_bulk_string(&arg)
-            .add_bulk_string(&value)
-            .to_string(),
-        Command::Psync(repl_id, offset) => RespBuilder::new()
-            .add_array(&3)
-            .add_bulk_string("PSYNC")
-            .add_bulk_string(&repl_id)
-            .add_bulk_string(&offset.to_string())
-            .to_string(),
-        Command::Type(key) => RespBuilder::new()
-            .add_array(&2)
-            .add_bulk_string("TYPE")
-            .add_bulk_string(&key.to_string())
-            .to_string(),
-        Command::Set(key, value, options) => {
-            let mut builder = RespBuilder::new();
-            let mut parts = vec!["SET".to_string(), key.to_string(), value];
-            for opt in options {
-                match opt {
-                    SetOption::NX => parts.push("NX".to_string()),
-                    SetOption::XX => parts.push("XX".to_string()),
-                    SetOption::IFEQ(v) => {
-                        parts.push("IFEQ".to_string());
-                        parts.push(v.clone());
-                    }
-                    SetOption::IFNE(v) => {
-                        parts.push("IFNE".to_string());
-                        parts.push(v.clone());
-                    }
-                    SetOption::IFDEQ(v) => {
-                        parts.push("IFDEQ".to_string());
-                        parts.push(v.clone());
-                    }
-                    SetOption::IFDNE(v) => {
-                        parts.push("IFDNE".to_string());
-                        parts.push(v.clone());
-                    }
-                    SetOption::GET => parts.push("GET".to_string()),
-                    SetOption::EX(v) => {
-                        parts.push("EX".to_string());
-                        parts.push(v.to_string());
-                    }
-                    SetOption::PX(v) => {
-                        parts.push("PX".to_string());
-                        parts.push(v.to_string());
-                    }
-                    SetOption::EXAT(v) => {
-                        parts.push("EXAT".to_string());
-                        parts.push(v.to_string());
-                    }
-                    SetOption::PXAT(v) => {
-                        parts.push("PXAT".to_string());
-                        parts.push(v.to_string());
-                    }
-                    SetOption::KEEPTTL => parts.push("KEEPTTL".to_string()),
-                }
-            }
-            builder.add_array(&parts.len());
-            for part in parts {
-                builder.add_bulk_string(&part);
-            }
-            builder.to_string()
-        }
-        Command::Get(key) => RespBuilder::new()
-            .add_array(&2)
-            .add_bulk_string("GET")
-            .add_bulk_string(&key.to_string())
-            .to_string(),
-        Command::Incr(key) => RespBuilder::new()
-            .add_array(&2)
-            .add_bulk_string("INCR")
-            .add_bulk_string(&key.to_string())
-            .to_string(),
-        Command::Rpush(key, values) => {
-            let mut parts = vec!["RPUSH".to_string(), key.to_string()];
-            parts.extend(values);
-            let mut builder = RespBuilder::new();
-            builder.add_array(&parts.len());
-            for part in parts {
-                builder.add_bulk_string(&part);
-            }
-            builder.to_string()
-        }
-        Command::Lpush(key, values) => {
-            let mut parts = vec!["LPUSH".to_string(), key.to_string()];
-            parts.extend(values);
-            let mut builder = RespBuilder::new();
-            builder.add_array(&parts.len());
-            for part in parts {
-                builder.add_bulk_string(&part);
-            }
-            builder.to_string()
-        }
-        Command::Lrange(key, start, stop) => RespBuilder::new()
-            .add_array(&4)
-            .add_bulk_string("LRANGE")
-            .add_bulk_string(&key.to_string())
-            .add_bulk_string(&start.to_string())
-            .add_bulk_string(&stop.to_string())
-            .to_string(),
-        Command::Llen(key) => RespBuilder::new()
-            .add_array(&2)
-            .add_bulk_string("LLEN")
-            .add_bulk_string(&key.to_string())
-            .to_string(),
-        Command::Lpop(key, count) => RespBuilder::new()
-            .add_array(&3)
-            .add_bulk_string("LPOP")
-            .add_bulk_string(&key.to_string())
-            .add_bulk_string(&count.to_string())
-            .to_string(),
-        Command::Blpop(key, timeout) => RespBuilder::new()
-            .add_array(&3)
-            .add_bulk_string("BLPOP")
-            .add_bulk_string(&key.to_string())
-            .add_bulk_string(&timeout.to_string())
-            .to_string(),
-        Command::Xadd(stream_key, key, fields) => {
-            let mut parts = vec!["XADD".to_string(), stream_key.to_string(), key.to_string()];
-            for (field, value) in fields {
-                parts.push(field);
-                parts.push(value);
-            }
-            let mut builder = RespBuilder::new();
-            builder.add_array(&parts.len());
-            for part in parts {
-                builder.add_bulk_string(&part);
-            }
-            builder.to_string()
-        }
-        Command::Xrange(start, end, count) => RespBuilder::new()
-            .add_array(&4)
-            .add_bulk_string("XRANGE")
-            .add_bulk_string(&start.to_string())
-            .add_bulk_string(&end.to_string())
-            .add_bulk_string(&count.to_string())
-            .to_string(),
-        Command::Xread(_) => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("XREAD")
-            .to_string(),
-        Command::Multi => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("MULTI")
-            .to_string(),
-        Command::Exec => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("EXEC")
-            .to_string(),
-        Command::Discard => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("DISCARD")
-            .to_string(),
-        Command::Wait(count, wait) => RespBuilder::new()
-            .add_array(&3)
-            .add_bulk_string("WAIT")
-            .add_bulk_string(&count.to_string())
-            .add_bulk_string(&wait.to_string())
-            .to_string(),
-        Command::ConfigGet(args) => {
-            let mut resp = RespBuilder::new();
-            resp.add_array(&(args.len() + 2));
-            resp.add_bulk_string("CONFIG");
-            resp.add_bulk_string("GET");
-            for arg in args {
-                resp.add_bulk_string(&arg);
-            }
-            resp.to_string()
-        }
-        Command::BgSave => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("BGSAVE")
-            .to_string(),
-        Command::Keys(query) => RespBuilder::new()
-            .add_array(&2)
-            .add_bulk_string("KEYS")
-            .add_bulk_string(&query)
-            .to_string(),
-        Command::Subscribe(channels) => {
-            let mut resp = RespBuilder::new();
-            resp.add_array(&(channels.len() + 2));
-            resp.add_bulk_string("SUBSCRIBE");
-            for ch in channels {
-                resp.add_bulk_string(&ch);
-            }
-            resp.to_string()
-        }
-        Command::Psubscribe(channels) => {
-            let mut resp = RespBuilder::new();
-            resp.add_array(&(channels.len() + 2));
-            resp.add_bulk_string("PSUBSCRIBE");
-            for ch in channels {
-                resp.add_bulk_string(&ch);
-            }
-            resp.to_string()
-        }
-        Command::Unsubscribe(channels) => {
-            let mut resp = RespBuilder::new();
-            resp.add_array(&(channels.len() + 2));
-            resp.add_bulk_string("UNSUBSCRIBE");
-            for ch in channels {
-                resp.add_bulk_string(&ch);
-            }
-            resp.to_string()
-        }
-        Command::Punsubscribe(channels) => {
-            let mut resp = RespBuilder::new();
-            resp.add_array(&(channels.len() + 2));
-            resp.add_bulk_string("PUNSUBSCRIBE");
-            for ch in channels {
-                resp.add_bulk_string(&ch);
-            }
-            resp.to_string()
-        }
-        Command::Quit => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("QUIT")
-            .to_string(),
-        Command::Reset => RespBuilder::new()
-            .add_array(&1)
-            .add_bulk_string("RESET")
-            .to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,5 +840,23 @@ mod tests {
         let data = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$3\r\n456\r\n*3\r\n$3\r\nSET\r\n$3\r\nbaz\r\n$3\r\n789\r\n";
         let result = prepare_commands(data);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn prepared_zadd() {
+        let data = "*7\r\n$4\r\nZADD\r\n$3\r\nmyz\r\n$2\r\nNX\r\n$3\r\n1.0\r\n$3\r\none\r\n$3\r\n5.2\r\n$3\r\ntwo\r\n";
+        let prepared = prepare_command(data).unwrap();
+        match prepared.cmd {
+            Command::Zadd(key, options, score_member_pairs) => {
+                assert_eq!(key, "myz");
+                assert!(options.contains(&AddOption::NX));
+                assert_eq!(score_member_pairs.len(), 2);
+                assert_eq!(score_member_pairs[0].0, 1.0);
+                assert_eq!(score_member_pairs[0].1, "one");
+                assert_eq!(score_member_pairs[1].0, 5.2);
+                assert_eq!(score_member_pairs[1].1, "two");
+            }
+            _ => panic!("Expected ZADD command"),
+        }
     }
 }

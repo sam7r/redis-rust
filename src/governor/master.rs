@@ -10,7 +10,7 @@ use std::{
     thread, time,
 };
 
-use crate::command;
+use crate::data::store::DataStore;
 use crate::governor::{
     error::GovError,
     traits::{Governor, Master},
@@ -19,7 +19,7 @@ use crate::governor::{
 use crate::persistence::encoder::RdbEncoder;
 use crate::persistence::types::ValueType;
 use crate::resp::RespBuilder;
-use crate::store::DataStore;
+use crate::{command, data};
 
 struct Replica {
     pub status: ReplicaOffsetState,
@@ -102,12 +102,12 @@ impl MasterGovernor {
                 }
 
                 match value {
-                    crate::store::Value::String(s) => {
+                    data::types::Value::String(s) => {
                         encoder.write_value_type(ValueType::String);
                         encoder.write_string(key);
                         encoder.write_string(s);
                     }
-                    crate::store::Value::List(list) => {
+                    data::types::Value::List(list) => {
                         encoder.write_value_type(ValueType::List);
                         encoder.write_string(key);
                         encoder.write_length(list.len());
@@ -115,7 +115,10 @@ impl MasterGovernor {
                             encoder.write_string(item);
                         }
                     }
-                    crate::store::Value::Stream(_) => {
+                    data::types::Value::SortedSet(_) => {
+                        // Sorted sets are type 3 (ZSet), skip for now
+                    }
+                    data::types::Value::Stream(_) => {
                         // Streams are type 14 (QuickList), skip for now
                     }
                 }
@@ -157,7 +160,12 @@ impl MasterGovernor {
                 .add_bulk_string("*");
 
             for repl in replicas.iter_mut() {
-                let mut stream = repl.stream.lock().unwrap();
+                let Ok(mut stream) = repl.stream.lock() else {
+                    println!("Replica stream lock failed, assuming disconnected");
+                    repl.status = ReplicaOffsetState::Unknown;
+                    continue;
+                };
+
                 match stream.write(get_ack_query.as_bytes()) {
                     Ok(0) | Err(_) => {
                         println!("GETACK not sent, asumming disconnected");
@@ -178,8 +186,12 @@ impl MasterGovernor {
                     Ok(bytes_read) => {
                         let response = String::from_utf8_lossy(&buff[..bytes_read]);
                         let out = command::prepare_command(&response);
-                        if let Some(command::Command::ReplConf(_, offset)) = out {
-                            repl.offset = offset.parse::<u64>().unwrap();
+                        if let Some(command::PreparedCommand {
+                            cmd: command::Command::ReplConf(_, offset),
+                            ..
+                        }) = out
+                        {
+                            repl.offset = offset.parse::<u64>().unwrap_or(0);
                             if repl.offset != self.repl_offset.load(Ordering::SeqCst) {
                                 repl.status = ReplicaOffsetState::Unconfirmed;
                             } else {
@@ -256,7 +268,9 @@ impl Master for MasterGovernor {
             let received_repl: Vec<ReplicaOffsetState> = {
                 self.replicas
                     .read()
-                    .unwrap()
+                    .map_err(|_| GovError {
+                        message: "Failed to acquire read lock on replicas".to_string(),
+                    })?
                     .iter()
                     .filter(|&r| r.status == ReplicaOffsetState::Confirmed)
                     .map(|r| r.status)
@@ -278,18 +292,18 @@ impl Master for MasterGovernor {
         }
     }
 
-    fn propagate_command(&self, cmd: command::Command) {
-        let out = command::serialize_command(cmd.clone());
-        if should_propagate_command(cmd.clone())
+    fn propagate_command(&self, prepared_cmd: command::PreparedCommand) {
+        let cmd = prepared_cmd.cmd;
+        if cmd.should_replicate()
             && let Ok(mut replicas) = self.replicas.write()
         {
             for repl in replicas.iter_mut() {
                 if let Ok(mut stream) = repl.stream.lock() {
-                    let _ = stream.write_all(out.as_bytes());
+                    let _ = stream.write_all(prepared_cmd.raw.as_bytes());
                     repl.status = ReplicaOffsetState::Unconfirmed;
                 }
             }
-            self.add_repl_offset(out.len() as u64);
+            self.add_repl_offset(prepared_cmd.raw.len() as u64);
         }
     }
 
@@ -361,16 +375,4 @@ impl Governor for MasterGovernor {
 fn generate_random_id() -> String {
     let mut rng = rand::rng();
     (0..40).map(|_| rng.sample(Alphanumeric) as char).collect()
-}
-
-fn should_propagate_command(cmd: command::Command) -> bool {
-    matches!(
-        cmd,
-        command::Command::Set(_, _, _)
-            | command::Command::Incr(_)
-            | command::Command::Rpush(_, _)
-            | command::Command::Lpush(_, _)
-            | command::Command::Lpop(_, _)
-            | command::Command::Xadd(_, _, _)
-    )
 }

@@ -1,171 +1,18 @@
+use glob_match::glob_match;
 use std::{
-    cmp,
     collections::{BTreeMap, HashMap},
-    fmt,
-    sync::{
-        self,
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
+    sync::{self, mpsc},
     thread,
-    time::SystemTime,
 };
 
-use glob_match::glob_match;
-
-#[derive(Clone, Debug)]
-pub enum StreamOption {
-    Block(u64),
-    Count(usize),
-    Streams(Vec<(StreamKey, StringKey)>),
-}
-
-#[derive(Clone, Debug)]
-#[allow(clippy::upper_case_acronyms)]
-pub enum SetOption {
-    // Only set if the key does not exist
-    NX,
-    // Only set if the key already exists
-    XX,
-    // Set the key’s value and expiration only if its current value is equal to ifeq-value.
-    // If the key doesn’t exist, it won’t be created.
-    IFEQ(String),
-    // Set the key’s value and expiration only if its current value is not equal to ifne-value.
-    // If the key doesn’t exist, it will be created.
-    IFNE(String),
-    // Set the key’s value and expiration only if the hash digest of its current value is equal to ifeq-digest.
-    // If the key doesn’t exist, it won’t be created.
-    IFDEQ(String),
-    // Set the key’s value and expiration only if the hash digest of its current value is equal to ifeq-digest.
-    // If the key doesn’t exist, it won’t be created
-    IFDNE(String),
-    // Return the old string stored at key, or nil if key did not exist.
-    // An error is returned and SET aborted if the value stored at key is not a string.
-    GET,
-    // Set the specified expire time, in seconds.
-    EX(u64),
-    // Set the specified expire time, in milliseconds.
-    PX(u128),
-    // Set the specified expire time, in seconds since the Unix epoch.
-    EXAT(u64),
-    // Set the specified expire time, in milliseconds since the Unix epoch
-    PXAT(u128),
-    // Retain the time to live associated with the key.
-    KEEPTTL,
-}
-
-pub struct Error {
-    error: DataStoreError,
-}
-
-impl std::fmt::Debug for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error)
-    }
-}
-
-impl Error {
-    fn from(t: DataStoreError) -> Self {
-        Error { error: t }
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error)
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub enum DataStoreError {
-    LockError,
-    StringNotNumber,
-    InvalidStreamEntryId,
-    StreamEntryIdMustBeGreaterThan(String),
-    StreamEntryIdLessThanLastEntry,
-    UnexpectedEmptyStream,
-}
-
-impl fmt::Display for DataStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DataStoreError::LockError => write!(f, "ERR Failed to access data"),
-            DataStoreError::InvalidStreamEntryId => write!(f, "ERR Invalid stream entry ID"),
-            DataStoreError::StringNotNumber => {
-                write!(f, "ERR value is not an integer or out of range")
-            }
-            DataStoreError::UnexpectedEmptyStream => {
-                write!(f, "ERR Encountered unexpected empty stream")
-            }
-            DataStoreError::StreamEntryIdLessThanLastEntry => {
-                write!(
-                    f,
-                    "ERR The ID specified in XADD is equal or smaller than the target stream top item"
-                )
-            }
-            DataStoreError::StreamEntryIdMustBeGreaterThan(v) => {
-                write!(f, "ERR The ID specified in XADD must be greater than {v}")
-            }
-        }
-    }
-}
-
-impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<StringKey, Value>>>> for Error {
-    fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<StringKey, Value>>>) -> Self {
-        Error::from(DataStoreError::LockError)
-    }
-}
-
-impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<StringKey, Value>>>> for Error {
-    fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<StringKey, Value>>>) -> Self {
-        Error::from(DataStoreError::LockError)
-    }
-}
-
-impl From<sync::PoisonError<sync::RwLockReadGuard<'_, HashMap<String, u128>>>> for Error {
-    fn from(_: sync::PoisonError<sync::RwLockReadGuard<HashMap<String, u128>>>) -> Self {
-        Error::from(DataStoreError::LockError)
-    }
-}
-
-impl From<sync::PoisonError<sync::RwLockWriteGuard<'_, HashMap<String, u128>>>> for Error {
-    fn from(_: sync::PoisonError<sync::RwLockWriteGuard<HashMap<String, u128>>>) -> Self {
-        Error::from(DataStoreError::LockError)
-    }
-}
-
-pub type StringKey = String;
-pub type StreamKey = String;
-pub type StreamEntryId = (u128, usize);
-pub type StreamEntry = BTreeMap<StreamEntryId, Vec<(String, String)>>;
-
-#[derive(Clone)]
-pub enum Value {
-    String(String),
-    List(Vec<String>),
-    Stream(StreamEntry),
-}
-
-impl cmp::PartialEq<String> for Value {
-    fn eq(&self, other: &String) -> bool {
-        match self {
-            Value::String(s) => s == other,
-            _ => false,
-        }
-    }
-}
-
-#[non_exhaustive]
-#[derive(Clone)]
-pub enum Event {
-    PushedToList(StringKey),
-    PushedToStream(StreamKey, StreamEntryId),
-    ExpireUpdated(u128),
-    CloseListener(usize),
-}
-
-type Subscribers = Vec<(usize, mpsc::Sender<Event>)>;
+use crate::data::{
+    errors::{DataStoreError, Error},
+    types::{
+        AddOption, Event, Score, SetOption, StreamEntry, StreamKey, StreamOption, StringKey,
+        Subscribers, Value,
+    },
+    utils::{create_subscriber_id, parse_entry_id_add, parse_entry_id_query, value_type_as_str},
+};
 
 pub struct DataStore {
     data: sync::RwLock<HashMap<StringKey, Value>>,
@@ -181,17 +28,105 @@ impl DataStore {
             channels: sync::RwLock::new(HashMap::new()),
         }
     }
+}
 
-    pub fn keys(&self, query: &str) -> Result<Vec<String>, Error> {
-        let data = self.data.read()?;
-        let keys = data
-            .keys()
-            .filter(|k| glob_match(query, k))
-            .cloned()
-            .collect::<Vec<String>>();
-        Ok(keys)
+/**
+ * Sorted Set commands:
+ * ZADD key [NX|XX|LT|GT] score member [score member ...]
+ * ZRANGE key start stop [WITHSCORES]
+ * ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+ * ZREM key member [member ...]
+ * ZCARD key
+ * ZSCORE key member
+ */
+impl DataStore {
+    pub fn zadd(
+        &self,
+        key: &str,
+        options: Vec<AddOption>,
+        score_members: Vec<(f64, String)>,
+    ) -> Result<Option<usize>, Error> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        let has = |opt: &AddOption| options.contains(opt);
+
+        match data.get_mut(key) {
+            Some(Value::SortedSet(set)) => {
+                let mut update_count = 0;
+
+                for (score, member) in &score_members {
+                    let new_score = Score::new(*score);
+
+                    let existing_entry = set.iter().find(|(_, m)| *m == member);
+                    let existing_score = existing_entry.map(|(s, _)| s.clone());
+
+                    if existing_score.is_some() && has(&AddOption::NX) {
+                        continue;
+                    }
+                    if existing_score.is_none() && has(&AddOption::XX) && !has(&AddOption::INCR) {
+                        continue;
+                    }
+
+                    if let Some(ref existing) = existing_score {
+                        if has(&AddOption::LT) && new_score >= *existing {
+                            continue;
+                        }
+                        if has(&AddOption::GT) && new_score <= *existing {
+                            continue;
+                        }
+                    }
+
+                    if has(&AddOption::INCR) {
+                        if let Some(existing) = existing_score {
+                            let mut incremented = existing.clone();
+                            incremented.add(*score);
+                            set.remove(&existing);
+                            set.insert(incremented, member.clone());
+                            update_count += 1;
+                        } else {
+                            set.insert(new_score, member.clone());
+                            update_count += 1;
+                        }
+                    } else {
+                        if let Some(existing) = existing_score {
+                            set.remove(&existing);
+                        }
+                        set.insert(new_score, member.clone());
+                        update_count += 1;
+                    }
+                }
+
+                Ok(Some(update_count))
+            }
+            None => {
+                if has(&AddOption::XX) && !has(&AddOption::INCR) {
+                    return Ok(None);
+                }
+
+                let count = score_members.len();
+                let set: BTreeMap<Score, String> = score_members
+                    .into_iter()
+                    .map(|(score, member)| (Score::new(score), member))
+                    .collect();
+
+                data.insert(String::from(key), Value::SortedSet(set));
+                Ok(Some(count))
+            }
+            Some(_) => Ok(None),
+        }
     }
+}
 
+/**
+ * Stream commands:
+ * XADD key [entry-id] field value [field value ...]
+ * XRANGE key start end [COUNT count]
+ * XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
+ */
+impl DataStore {
     pub fn xread(
         &self,
         options: Vec<StreamOption>,
@@ -260,7 +195,11 @@ impl DataStore {
         let (entry_id_stop_millis, entry_id_stop_seq) =
             parse_entry_id_query(entry_id_stop_str, false)?;
 
-        let data = self.data.read()?;
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
         match data.get(key) {
             Some(Value::Stream(stream)) => {
                 let start_entry_id = (entry_id_start_millis, entry_id_start_seq.unwrap_or(0));
@@ -289,7 +228,10 @@ impl DataStore {
         fields: Vec<(String, String)>,
     ) -> Result<Option<String>, Error> {
         let (entry_millis, entry_seq_opt) = parse_entry_id_add(entry_id_str)?;
-        let mut data = self.data.write()?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
 
         let Some(value) = data.get(key).cloned() else {
             let entry_seq = entry_seq_opt.unwrap_or(if entry_millis == 0 { 1 } else { 0 });
@@ -334,332 +276,6 @@ impl DataStore {
             }
             _ => Ok(None),
         }
-    }
-
-    pub fn get(&self, key: &str) -> Result<Option<String>, Error> {
-        let data = self.data.read()?;
-        let value = data.get(key).cloned();
-
-        if let Some(v) = value {
-            match v {
-                Value::String(result) => return Ok(Some(result)),
-                _ => return Ok(None),
-            }
-        }
-
-        Ok(None)
-    }
-
-    pub fn incr(&self, key: &str) -> Result<Option<i64>, Error> {
-        let mut data = self.data.write()?;
-        let value = data.get(key);
-        let mut incr = 1;
-
-        if let Some(v) = value {
-            match v {
-                Value::String(result) => match result.parse::<i64>() {
-                    Ok(v) => {
-                        incr += v;
-                    }
-                    Err(_) => {
-                        return Err(Error::from(DataStoreError::StringNotNumber));
-                    }
-                },
-                _ => return Ok(None),
-            }
-        }
-
-        data.insert(String::from(key), Value::String(incr.to_string()));
-        Ok(Some(incr))
-    }
-
-    pub fn set_expire(&self, key: &str, expire_time_millis: u128) -> Result<(), Error> {
-        self.expires
-            .write()
-            .unwrap()
-            .insert(String::from(key), expire_time_millis);
-        self.publish_to_subscribers(key, Event::ExpireUpdated(expire_time_millis))?;
-        Ok(())
-    }
-
-    pub fn set(
-        &self,
-        key: &str,
-        value: String,
-        _options: Vec<SetOption>,
-    ) -> Result<Option<String>, Error> {
-        let mut ttl_options = Vec::new();
-        let mut mod_options = Vec::new();
-
-        _options.into_iter().for_each(|opt| match opt {
-            SetOption::EX(_)
-            | SetOption::PX(_)
-            | SetOption::EXAT(_)
-            | SetOption::PXAT(_)
-            | SetOption::KEEPTTL => {
-                ttl_options.push(opt);
-            }
-            SetOption::NX
-            | SetOption::XX
-            | SetOption::IFEQ(_)
-            | SetOption::IFNE(_)
-            | SetOption::IFDEQ(_)
-            | SetOption::IFDNE(_)
-            | SetOption::GET => {
-                mod_options.push(opt);
-            }
-        });
-
-        for option in ttl_options {
-            match option {
-                SetOption::EX(seconds) => {
-                    let expire_time = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis()
-                        + (seconds as u128 * 1000);
-                    self.set_expire(key, expire_time)?;
-                }
-                SetOption::EXAT(seconds) => {
-                    self.set_expire(key, seconds as u128 * 1000)?;
-                }
-                SetOption::PX(milliseconds) => {
-                    let expire_time = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis()
-                        + milliseconds;
-                    self.set_expire(key, expire_time)?;
-                }
-                SetOption::PXAT(expire_time) => {
-                    self.set_expire(key, expire_time)?;
-                }
-                SetOption::KEEPTTL => {
-                    // Do nothing, retain existing TTL
-                }
-                _ => {}
-            }
-        }
-
-        let mut data = self.data.write()?;
-
-        for option in mod_options {
-            match option {
-                SetOption::NX => {
-                    if data.contains_key(key) {
-                        return Ok(None);
-                    }
-                }
-                SetOption::XX => {
-                    if !data.contains_key(key) {
-                        return Ok(None);
-                    }
-                }
-                SetOption::IFEQ(ifeq_value) => {
-                    if let Some(current_value) = data.get(key) {
-                        if current_value != &ifeq_value {
-                            return Ok(None);
-                        }
-                    } else {
-                        return Ok(None);
-                    }
-                }
-                SetOption::IFNE(ifne_value) => {
-                    if let Some(current_value) = data.get(key)
-                        && current_value == &ifne_value
-                    {
-                        return Ok(None);
-                    }
-                }
-                SetOption::IFDEQ(_ifeq_digest) => {}
-                SetOption::IFDNE(_ifne_digest) => {}
-                SetOption::GET => {}
-                _ => {}
-            }
-        }
-
-        data.insert(String::from(key), Value::String(value));
-
-        Ok(Some("OK".to_string()))
-    }
-
-    pub fn lrange(&self, key: &str, range: (i64, i64)) -> Result<Option<Vec<String>>, Error> {
-        let data = self.data.read()?;
-        if let Some(value) = data.get(key) {
-            match value {
-                Value::List(list) => {
-                    let (mut start, mut stop) = range;
-                    let len = list.len() as i64;
-
-                    // normalize negative indices
-                    start = if start >= 0 { start } else { len + start };
-                    stop = if stop < 0 { len + stop } else { stop };
-
-                    if start < 0 {
-                        start = 0;
-                    }
-                    if stop >= len {
-                        stop = len - 1;
-                    }
-
-                    if start >= len || start > stop {
-                        return Ok(Some(Vec::new()));
-                    }
-
-                    Ok(Some(list[start as usize..=stop as usize].to_vec()))
-                }
-                _ => Ok(None),
-            }
-        } else {
-            Ok(Some(vec![]))
-        }
-    }
-
-    pub fn push(&self, key: &str, value: Vec<String>, lpush: bool) -> Result<Option<usize>, Error> {
-        let mut value_list = value;
-        let mut data = self.data.write()?;
-
-        if let Some(existing_value) = data.get(key).cloned() {
-            match existing_value {
-                Value::List(mut list) => {
-                    if lpush {
-                        value_list.reverse();
-                        value_list.extend(list);
-                    } else {
-                        list.extend(value_list);
-                        value_list = list;
-                    }
-                }
-                _ => return Ok(None),
-            };
-        }
-
-        let len = value_list.len();
-        data.insert(String::from(key), Value::List(value_list));
-
-        self.publish_to_subscribers(key, Event::PushedToList(String::from(key)))?;
-
-        Ok(Some(len))
-    }
-
-    pub fn llen(&self, key: StringKey) -> Result<Option<usize>, Error> {
-        let data = self.data.read()?;
-        if let Some(value) = data.get(&key) {
-            match value {
-                Value::List(list) => Ok(Some(list.len())),
-                _ => Ok(None),
-            }
-        } else {
-            Ok(Some(0))
-        }
-    }
-
-    pub fn lpop(&self, key: &str, count: u8) -> Result<Option<Vec<String>>, Error> {
-        let mut data = self.data.write()?;
-        if let Some(value) = data.get(key).cloned() {
-            match value {
-                Value::List(mut list) => {
-                    let mut split_from = count;
-                    if count as usize > list.len() {
-                        split_from = list.len() as u8;
-                    }
-
-                    let new_list = list.split_off(split_from as usize);
-                    data.insert(String::from(key), Value::List(new_list));
-
-                    self.publish_to_subscribers(key, Event::PushedToList(String::from(key)))?;
-
-                    Ok(Some(list))
-                }
-                _ => Ok(None),
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn blpop(&self, key: &str, wait_time_seconds: f32) -> Result<Option<Vec<String>>, Error> {
-        if let Ok(v) = self.try_lpop_one(key)
-            && let Some(value) = v
-        {
-            return Ok(Some(vec![value]));
-        }
-
-        let (sender, receiver) = mpsc::channel();
-
-        match self.add_channel_subscriber(key, sender.clone()) {
-            Ok(sub_id) => {
-                if wait_time_seconds > 0f32 {
-                    let closer = sender.clone();
-                    thread::spawn(move || {
-                        thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
-                        let _ = closer.send(Event::CloseListener(sub_id));
-                    });
-                }
-
-                while let Ok(event) = receiver.recv() {
-                    match event {
-                        Event::PushedToList(key) => {
-                            if let Ok(v) = self.try_lpop_one(&key)
-                                && let Some(value) = v
-                            {
-                                self.remove_channel_subscriber(&key, sub_id)?;
-                                return Ok(Some(vec![value]));
-                            }
-                        }
-                        Event::CloseListener(id) => {
-                            if id == sub_id {
-                                self.remove_channel_subscriber(key, id)?;
-                                return Ok(None);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Err(_) => return Err(Error::from(DataStoreError::LockError)),
-        }
-
-        Ok(None)
-    }
-
-    pub fn get_type(&self, key: &str) -> Result<Option<String>, Error> {
-        let data = self.data.read()?;
-        match data.get(key) {
-            Some(v) => Ok(Some(value_type_as_str(v).to_string())),
-            None => Ok(None),
-        }
-    }
-
-    pub fn iter(&self) -> Result<DataStoreIter, Error> {
-        let data = self.data.read()?;
-        let expires = self.expires.read()?;
-        Ok(DataStoreIter {
-            data: data.clone(),
-            expires: expires.clone(),
-        })
-    }
-
-    pub fn cleanup(&self) {
-        let expired_keys: Vec<String>;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-
-        {
-            // scope block to release read lock on expirable
-            let expirable = self.expires.read().unwrap();
-            expired_keys = expirable
-                .iter()
-                .filter(|(_, timestamp)| *timestamp <= &now)
-                .map(|(key, _)| key.clone())
-                .collect();
-        }
-
-        expired_keys.iter().for_each(|key| {
-            let _ = self.del(key);
-        });
     }
 
     fn xstream_wait_for(
@@ -728,18 +344,337 @@ impl DataStore {
         }
         Ok(None)
     }
+}
 
-    fn del(&self, key: &str) -> Result<(), Error> {
-        {
-            let mut data = self.data.write()?;
-            data.remove(key);
-        }
-        {
-            let mut expirable = self.expires.write().unwrap();
-            expirable.remove(key);
+/**
+ * String commands:
+ * GET key
+ * SET key value [EX seconds|PX milliseconds|EXAT timestamp|PXAT timestamp|KEEPTTL] [NX|XX|IFEQ value|IFNE value|IFDEQ digest|IFDNE digest] [GET]
+ * INCR key
+ */
+impl DataStore {
+    pub fn get(&self, key: &str) -> Result<Option<String>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        let value = data.get(key).cloned();
+
+        if let Some(v) = value {
+            match v {
+                Value::String(result) => return Ok(Some(result)),
+                _ => return Ok(None),
+            }
         }
 
+        Ok(None)
+    }
+
+    pub fn incr(&self, key: &str) -> Result<Option<i64>, Error> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        let value = data.get(key);
+        let mut incr = 1;
+
+        if let Some(v) = value {
+            match v {
+                Value::String(result) => match result.parse::<i64>() {
+                    Ok(v) => {
+                        incr += v;
+                    }
+                    Err(_) => {
+                        return Err(Error::from(DataStoreError::StringNotNumber));
+                    }
+                },
+                _ => return Ok(None),
+            }
+        }
+
+        data.insert(String::from(key), Value::String(incr.to_string()));
+        Ok(Some(incr))
+    }
+
+    pub fn set_expire(&self, key: &str, expire_time_millis: u128) -> Result<(), Error> {
+        self.expires
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?
+            .insert(String::from(key), expire_time_millis);
+        self.publish_to_subscribers(key, Event::ExpireUpdated(expire_time_millis))?;
         Ok(())
+    }
+
+    pub fn set(
+        &self,
+        key: &str,
+        value: String,
+        _options: Vec<SetOption>,
+    ) -> Result<Option<String>, Error> {
+        let mut ttl_options = Vec::new();
+        let mut mod_options = Vec::new();
+
+        _options.into_iter().for_each(|opt| match opt {
+            SetOption::EX(_)
+            | SetOption::PX(_)
+            | SetOption::EXAT(_)
+            | SetOption::PXAT(_)
+            | SetOption::KEEPTTL => {
+                ttl_options.push(opt);
+            }
+            SetOption::NX
+            | SetOption::XX
+            | SetOption::IFEQ(_)
+            | SetOption::IFNE(_)
+            | SetOption::IFDEQ(_)
+            | SetOption::IFDNE(_)
+            | SetOption::GET => {
+                mod_options.push(opt);
+            }
+        });
+
+        for option in ttl_options {
+            match option {
+                SetOption::EX(seconds) => {
+                    let expire_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                        + (seconds as u128 * 1000);
+                    self.set_expire(key, expire_time)?;
+                }
+                SetOption::EXAT(seconds) => {
+                    self.set_expire(key, seconds as u128 * 1000)?;
+                }
+                SetOption::PX(milliseconds) => {
+                    let expire_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                        + milliseconds;
+                    self.set_expire(key, expire_time)?;
+                }
+                SetOption::PXAT(expire_time) => {
+                    self.set_expire(key, expire_time)?;
+                }
+                SetOption::KEEPTTL => {
+                    // Do nothing, retain existing TTL
+                }
+                _ => {}
+            }
+        }
+
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        for option in mod_options {
+            match option {
+                SetOption::NX => {
+                    if data.contains_key(key) {
+                        return Ok(None);
+                    }
+                }
+                SetOption::XX => {
+                    if !data.contains_key(key) {
+                        return Ok(None);
+                    }
+                }
+                SetOption::IFEQ(ifeq_value) => {
+                    if let Some(current_value) = data.get(key) {
+                        if current_value != &ifeq_value {
+                            return Ok(None);
+                        }
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                SetOption::IFNE(ifne_value) => {
+                    if let Some(current_value) = data.get(key)
+                        && current_value == &ifne_value
+                    {
+                        return Ok(None);
+                    }
+                }
+                SetOption::IFDEQ(_ifeq_digest) => {}
+                SetOption::IFDNE(_ifne_digest) => {}
+                SetOption::GET => {}
+                _ => {}
+            }
+        }
+
+        data.insert(String::from(key), Value::String(value));
+
+        Ok(Some("OK".to_string()))
+    }
+}
+
+/**
+ * List commands:
+ * LPUSH key value [value ...]
+ * RPUSH key value [value ...]
+ * LLEN key
+ * LRANGE key start stop
+ * LPOP key [count]
+ * BLPOP key [count] [BLOCK wait_time_seconds]
+ */
+impl DataStore {
+    pub fn lrange(&self, key: &str, range: (i64, i64)) -> Result<Option<Vec<String>>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        if let Some(value) = data.get(key) {
+            match value {
+                Value::List(list) => {
+                    let (mut start, mut stop) = range;
+                    let len = list.len() as i64;
+
+                    // normalize negative indices
+                    start = if start >= 0 { start } else { len + start };
+                    stop = if stop < 0 { len + stop } else { stop };
+
+                    if start < 0 {
+                        start = 0;
+                    }
+                    if stop >= len {
+                        stop = len - 1;
+                    }
+
+                    if start >= len || start > stop {
+                        return Ok(Some(Vec::new()));
+                    }
+
+                    Ok(Some(list[start as usize..=stop as usize].to_vec()))
+                }
+                _ => Ok(None),
+            }
+        } else {
+            Ok(Some(vec![]))
+        }
+    }
+
+    pub fn push(&self, key: &str, value: Vec<String>, lpush: bool) -> Result<Option<usize>, Error> {
+        let mut value_list = value;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        if let Some(existing_value) = data.get(key).cloned() {
+            match existing_value {
+                Value::List(mut list) => {
+                    if lpush {
+                        value_list.reverse();
+                        value_list.extend(list);
+                    } else {
+                        list.extend(value_list);
+                        value_list = list;
+                    }
+                }
+                _ => return Ok(None),
+            };
+        }
+
+        let len = value_list.len();
+        data.insert(String::from(key), Value::List(value_list));
+
+        self.publish_to_subscribers(key, Event::PushedToList(String::from(key)))?;
+
+        Ok(Some(len))
+    }
+
+    pub fn llen(&self, key: StringKey) -> Result<Option<usize>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        if let Some(value) = data.get(&key) {
+            match value {
+                Value::List(list) => Ok(Some(list.len())),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(Some(0))
+        }
+    }
+
+    pub fn lpop(&self, key: &str, count: u8) -> Result<Option<Vec<String>>, Error> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        if let Some(value) = data.get(key).cloned() {
+            match value {
+                Value::List(mut list) => {
+                    let mut split_from = count;
+                    if count as usize > list.len() {
+                        split_from = list.len() as u8;
+                    }
+
+                    let new_list = list.split_off(split_from as usize);
+                    data.insert(String::from(key), Value::List(new_list));
+
+                    self.publish_to_subscribers(key, Event::PushedToList(String::from(key)))?;
+
+                    Ok(Some(list))
+                }
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn blpop(&self, key: &str, wait_time_seconds: f32) -> Result<Option<Vec<String>>, Error> {
+        if let Ok(v) = self.try_lpop_one(key)
+            && let Some(value) = v
+        {
+            return Ok(Some(vec![value]));
+        }
+
+        let (sender, receiver) = mpsc::channel();
+
+        match self.add_channel_subscriber(key, sender.clone()) {
+            Ok(sub_id) => {
+                if wait_time_seconds > 0f32 {
+                    let closer = sender.clone();
+                    thread::spawn(move || {
+                        thread::sleep(std::time::Duration::from_secs_f32(wait_time_seconds));
+                        let _ = closer.send(Event::CloseListener(sub_id));
+                    });
+                }
+
+                while let Ok(event) = receiver.recv() {
+                    match event {
+                        Event::PushedToList(key) => {
+                            if let Ok(v) = self.try_lpop_one(&key)
+                                && let Some(value) = v
+                            {
+                                self.remove_channel_subscriber(&key, sub_id)?;
+                                return Ok(Some(vec![value]));
+                            }
+                        }
+                        Event::CloseListener(id) => {
+                            if id == sub_id {
+                                self.remove_channel_subscriber(key, id)?;
+                                return Ok(None);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => return Err(Error::from(DataStoreError::LockError)),
+        }
+
+        Ok(None)
     }
 
     fn try_lpop_one(&self, key: &str) -> Result<Option<String>, Error> {
@@ -756,6 +691,108 @@ impl DataStore {
             },
             Err(_) => Ok(None),
         }
+    }
+}
+
+/**
+ * Other commands:
+ * KEYS pattern
+ * TYPE key
+ *
+ * includes:
+ * - utility functions for RDB and cleaning up expired keys
+ * - pub/sub functionality for notifying subscribers of changes to keys
+ */
+impl DataStore {
+    pub fn keys(&self, query: &str) -> Result<Vec<String>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        let keys = data
+            .keys()
+            .filter(|k| glob_match(query, k))
+            .cloned()
+            .collect::<Vec<String>>();
+        Ok(keys)
+    }
+
+    pub fn get_type(&self, key: &str) -> Result<Option<String>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        match data.get(key) {
+            Some(v) => Ok(Some(value_type_as_str(v).to_string())),
+            None => Ok(None),
+        }
+    }
+
+    pub fn iter(&self) -> Result<DataStoreIter, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        let expires = self
+            .expires
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        Ok(DataStoreIter {
+            data: data.clone(),
+            expires: expires.clone(),
+        })
+    }
+
+    pub fn cleanup(&self) -> Result<(), Error> {
+        let expired_keys: Vec<String>;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        {
+            // scope block to release read lock on expirable
+            let expirable = self
+                .expires
+                .read()
+                .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+            expired_keys = expirable
+                .iter()
+                .filter(|(_, timestamp)| *timestamp <= &now)
+                .map(|(key, _)| key.clone())
+                .collect();
+        }
+
+        expired_keys.iter().for_each(|key| {
+            let _ = self.del(key);
+        });
+
+        Ok(())
+    }
+
+    fn del(&self, key: &str) -> Result<(), Error> {
+        {
+            let mut data = self
+                .data
+                .write()
+                .map_err(|_| Error::from(DataStoreError::LockError))?;
+            data.remove(key);
+        }
+        {
+            let mut expirable = self
+                .expires
+                .write()
+                .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+            expirable.remove(key);
+        }
+
+        Ok(())
     }
 
     pub fn add_channel_subscriber(
@@ -820,87 +857,5 @@ impl DataStoreIter {
             let expiry = self.expires.get(k).copied();
             (k, v, expiry)
         })
-    }
-}
-
-fn create_subscriber_id() -> usize {
-    static COUNTER: AtomicUsize = AtomicUsize::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn value_type_as_str<'a>(v: &Value) -> &'a str {
-    match v {
-        Value::List(_) => "list",
-        Value::String(_) => "string",
-        Value::Stream(_) => "stream",
-    }
-}
-
-fn parse_entry_id_query(
-    entry_id_str: &str,
-    is_start: bool,
-) -> Result<(u128, Option<usize>), Error> {
-    if entry_id_str == "$" {
-        return Ok((0, None));
-    }
-    let entry_id_str = if is_start && entry_id_str == "-" {
-        "0-0"
-    } else if !is_start && entry_id_str == "+" {
-        &format!("{}-{}", u128::MAX, usize::MAX)
-    } else {
-        entry_id_str
-    };
-    let entry_id_str_split: Vec<&str> = entry_id_str.split("-").collect();
-
-    if entry_id_str_split.is_empty() {
-        return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-    }
-    let Ok(entry_id_millis) = entry_id_str_split[0].parse::<u128>() else {
-        return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-    };
-    if entry_id_str_split.len() > 1 {
-        let Ok(entry_id_seq) = entry_id_str_split[1].parse::<usize>() else {
-            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-        };
-        Ok((entry_id_millis, Some(entry_id_seq)))
-    } else {
-        Ok((entry_id_millis, None))
-    }
-}
-
-fn parse_entry_id_add(entry_id_str: &str) -> Result<(u128, Option<usize>), Error> {
-    if entry_id_str == "*" {
-        let entry_seq: usize = 0;
-        let entry_millis: u128 = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-
-        Ok((entry_millis, Some(entry_seq)))
-    } else {
-        let entry_id_str_split: Vec<&str> = entry_id_str.split('-').collect();
-        if entry_id_str_split.len() != 2 {
-            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-        }
-
-        let Some(entry_millis) = entry_id_str_split[0].parse::<u128>().ok() else {
-            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-        };
-
-        if entry_id_str_split[1] == "*" {
-            return Ok((entry_millis, None));
-        }
-
-        let Some(entry_seq) = entry_id_str_split[1].parse::<usize>().ok() else {
-            return Err(Error::from(DataStoreError::InvalidStreamEntryId));
-        };
-
-        if entry_millis == 0 && entry_seq == 0 {
-            return Err(Error::from(DataStoreError::StreamEntryIdMustBeGreaterThan(
-                "0-0".to_string(),
-            )));
-        }
-
-        Ok((entry_millis, Some(entry_seq)))
     }
 }

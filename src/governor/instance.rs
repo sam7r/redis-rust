@@ -1,4 +1,5 @@
 use crate::{
+    data::store::DataStore,
     governor::{
         error::GovError,
         master::MasterGovernor,
@@ -6,7 +7,6 @@ use crate::{
         traits::{Governor, Master, Slave},
         types::{Config, ExpireStrategy, Info, Psync},
     },
-    store::DataStore,
 };
 
 pub enum GovernorInstance {
@@ -94,9 +94,9 @@ impl Master for GovernorInstance {
         }
     }
 
-    fn propagate_command(&self, command: crate::command::Command) {
+    fn propagate_command(&self, prepared_cmd: crate::command::PreparedCommand) {
         match self {
-            GovernorInstance::Master(m) => m.propagate_command(command),
+            GovernorInstance::Master(m) => m.propagate_command(prepared_cmd),
             GovernorInstance::Slave(_) => {}
         }
     }

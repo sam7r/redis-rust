@@ -1,15 +1,10 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::RwLock};
 
 use glob_match::glob_match;
 
-use crate::message::types::{
-    Message, Subscriber, SubscriberId, SubscriberRx, SubscriberTx, TopicFilter,
+use crate::message::{
+    types::{Message, Subscriber, SubscriberId, SubscriberRx, SubscriberTx, TopicFilter},
+    utils::create_subscriber_id,
 };
 
 pub struct Broker {
@@ -24,10 +19,8 @@ impl Broker {
             subscriptions: RwLock::new(HashMap::new()),
         }
     }
-}
 
-impl MessageBroker for Broker {
-    fn register_subscriber(
+    pub fn register_subscriber(
         &self,
     ) -> Result<(SubscriberId, SubscriberRx), Box<dyn std::error::Error>> {
         let id = create_subscriber_id();
@@ -47,7 +40,7 @@ impl MessageBroker for Broker {
         Ok((id, rx))
     }
 
-    fn drop_subscriber(&self, id: SubscriberId) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn drop_subscriber(&self, id: SubscriberId) -> Result<(), Box<dyn std::error::Error>> {
         {
             let mut subs = match self.subscribers.write() {
                 Ok(guard) => guard,
@@ -59,7 +52,7 @@ impl MessageBroker for Broker {
         Ok(())
     }
 
-    fn subscribe(
+    pub fn subscribe(
         &self,
         id: SubscriberId,
         topic: TopicFilter,
@@ -92,7 +85,7 @@ impl MessageBroker for Broker {
         }
     }
 
-    fn unsubscribe(
+    pub fn unsubscribe(
         &self,
         id: SubscriberId,
         topic: TopicFilter,
@@ -125,7 +118,7 @@ impl MessageBroker for Broker {
         }
     }
 
-    fn unsubscribe_all(&self, id: SubscriberId) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn unsubscribe_all(&self, id: SubscriberId) -> Result<(), Box<dyn std::error::Error>> {
         {
             let mut subz = match self.subscriptions.write() {
                 Ok(guard) => guard,
@@ -151,7 +144,7 @@ impl MessageBroker for Broker {
         }
     }
 
-    fn publish(&self, message: Message) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    pub fn publish(&self, message: Message) -> Result<Option<usize>, Box<dyn std::error::Error>> {
         let subz = match self.subscriptions.read() {
             Ok(guard) => guard,
             Err(_) => return Err("Lock poisoned".into()),
@@ -182,28 +175,4 @@ impl MessageBroker for Broker {
             });
         Ok(Some(published))
     }
-}
-
-pub trait MessageBroker {
-    fn publish(&self, message: Message) -> Result<Option<usize>, Box<dyn std::error::Error>>;
-    fn unsubscribe_all(&self, id: SubscriberId) -> Result<(), Box<dyn std::error::Error>>;
-    fn drop_subscriber(&self, id: SubscriberId) -> Result<(), Box<dyn std::error::Error>>;
-    fn register_subscriber(
-        &self,
-    ) -> Result<(SubscriberId, SubscriberRx), Box<dyn std::error::Error>>;
-    fn subscribe(
-        &self,
-        id: SubscriberId,
-        topic: TopicFilter,
-    ) -> Result<Option<usize>, Box<dyn std::error::Error>>;
-    fn unsubscribe(
-        &self,
-        id: SubscriberId,
-        topic: TopicFilter,
-    ) -> Result<Option<usize>, Box<dyn std::error::Error>>;
-}
-
-fn create_subscriber_id() -> usize {
-    static COUNTER: AtomicUsize = AtomicUsize::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }

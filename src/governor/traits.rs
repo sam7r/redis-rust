@@ -8,13 +8,13 @@ use std::{
 
 use crate::{
     command,
+    data::{store::DataStore, types::Event},
     governor::{
         error::GovError,
         types::{Config, ExpireStrategy, Info, Psync},
     },
     persistence::{decoder::RdbDecoder, types::Expiry},
     resp::RespBuilder,
-    store::{DataStore, Event},
 };
 
 pub trait Governor {
@@ -91,7 +91,9 @@ pub trait Governor {
                 thread::spawn(move || {
                     loop {
                         thread::sleep(interval);
-                        store.cleanup();
+                        if store.cleanup().is_err() {
+                            println!("Error during scheduled cleanup");
+                        }
                     }
                 });
             }
@@ -138,7 +140,9 @@ pub trait Governor {
                             }
                         };
                         if should_cleanup {
-                            store.cleanup();
+                            if store.cleanup().is_err() {
+                                println!("Error during lazy cleanup");
+                            }
                             let mut wt = next_tick.write().unwrap();
                             *wt = 0;
                         }
@@ -189,7 +193,7 @@ pub trait Governor {
 
 pub trait Master: Governor {
     fn get_config(&self) -> Config;
-    fn propagate_command(&self, command: command::Command);
+    fn propagate_command(&self, prepared_cmd: command::PreparedCommand);
     fn confirm_replica_ack(&self, repl_count: u8, wait_time: u64) -> Result<Option<u8>, GovError>;
     fn bgsave(&self) -> Result<String, Box<dyn std::error::Error>>;
 
