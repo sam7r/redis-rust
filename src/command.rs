@@ -1,3 +1,5 @@
+use crate::data::types::SortedRangeOption;
+
 use super::data::types::{AddOption, SetOption, StreamKey, StreamOption, StringKey};
 use super::governor::types::Info;
 use super::resp::{DataType, RespParser};
@@ -74,6 +76,7 @@ pub enum Command {
     // sorted set
     Zadd(StringKey, Vec<AddOption>, Vec<(f64, StringKey)>),
     Zrank(StringKey, StringKey, bool),
+    Zrange(StringKey, i64, i64, Vec<SortedRangeOption>),
     // transaction
     Multi,
     Exec,
@@ -125,6 +128,7 @@ impl Command {
             Command::Quit => "QUIT",
             Command::Zadd(_, _, _) => "ZADD",
             Command::Zrank(_, _, _) => "ZRANK",
+            Command::Zrange(_, _, _, _) => "ZRANGE",
         }
     }
 
@@ -317,6 +321,11 @@ impl Command {
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
             Command::Zrank(_, _, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Zrange(_, _, _, _) => CommandAcl {
                 client_context: ClientContext::Any,
                 command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
@@ -655,7 +664,41 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                         None
                     }
                 }
-
+                "ZRANGE" => {
+                    if command_parts.len() >= 4 {
+                        let key = StringKey::from(command_parts[1]);
+                        let start: i64 = command_parts[2].parse().ok()?;
+                        let stop: i64 = command_parts[3].parse().ok()?;
+                        let mut options = Vec::new();
+                        if command_parts.len() > 4 {
+                            let opts = command_parts[4..].to_vec();
+                            let mut opts_iter = opts.iter();
+                            while let Some(opt) = opts_iter.next() {
+                                match opt.to_uppercase().as_str() {
+                                    "WITHSCORES" => options.push(SortedRangeOption::WITHSCORES),
+                                    "BYSCORE" => options.push(SortedRangeOption::BYSCORE),
+                                    "BYLEX" => options.push(SortedRangeOption::BYLEX),
+                                    "REV" => options.push(SortedRangeOption::REV),
+                                    "LIMIT" => {
+                                        if let (Some(offset_str), Some(count_str)) =
+                                            (opts_iter.next(), opts_iter.next())
+                                            && let (Ok(offset), Ok(count)) = (
+                                                offset_str.parse::<usize>(),
+                                                count_str.parse::<usize>(),
+                                            )
+                                        {
+                                            options.push(SortedRangeOption::LIMIT(offset, count));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Some(Command::Zrange(key, start, stop, options))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }

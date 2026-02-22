@@ -137,3 +137,13 @@ pub enum SetOption {
     // Retain the time to live associated with the key.
     KEEPTTL,
 }
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SortedRangeOption {
+    BYSCORE,
+    BYLEX,
+    REV,
+    LIMIT(usize, usize),
+    WITHSCORES,
+}

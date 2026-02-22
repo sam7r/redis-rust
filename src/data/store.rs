@@ -8,8 +8,8 @@ use std::{
 use crate::data::{
     errors::{DataStoreError, Error},
     types::{
-        AddOption, Event, Score, SetOption, StreamEntry, StreamKey, StreamOption, StringKey,
-        Subscribers, Value,
+        AddOption, Event, Score, SetOption, SortedRangeOption, StreamEntry, StreamKey,
+        StreamOption, StringKey, Subscribers, Value,
     },
     utils::{create_subscriber_id, parse_entry_id_add, parse_entry_id_query, value_type_as_str},
 };
@@ -142,6 +142,52 @@ impl DataStore {
                     }
                 }
                 Ok(None)
+            }
+            Some(_) | None => Ok(None),
+        }
+    }
+
+    pub fn zrange(
+        &self,
+        key: &str,
+        start: i64,
+        stop: i64,
+        options: Vec<SortedRangeOption>,
+    ) -> Result<Option<Vec<(String, f64)>>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+        let has = |opt: &SortedRangeOption| options.contains(opt);
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => {
+                let len = set.len() as i64;
+                let mut start = if start >= 0 { start } else { len + start };
+                let mut stop = if stop >= 0 { stop } else { len + stop };
+                if start < 0 {
+                    start = 0;
+                }
+                if stop >= len {
+                    stop = len - 1;
+                }
+                if start > stop || start >= len {
+                    return Ok(Some(vec![]));
+                }
+
+                let range = set
+                    .iter()
+                    .skip(start as usize)
+                    .take((stop - start + 1) as usize)
+                    .map(|(s, m)| {
+                        if has(&SortedRangeOption::WITHSCORES) {
+                            (m.clone(), s.get_score())
+                        } else {
+                            (m.clone(), 0.0)
+                        }
+                    })
+                    .collect::<Vec<(String, f64)>>();
+
+                Ok(Some(range))
             }
             Some(_) | None => Ok(None),
         }

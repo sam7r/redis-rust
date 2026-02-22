@@ -21,6 +21,8 @@ use message::{
     types::{Message, SubscriberId, TopicFilter},
 };
 
+use crate::data::types::SortedRangeOption;
+
 mod args;
 mod command;
 mod config;
@@ -595,6 +597,33 @@ fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> 
                 resp
             }
         },
+        Command::Zrange(key, start, stop, options) => {
+            match store.zrange(&key, start, stop, options.clone()) {
+                Ok(result) => {
+                    let mut resp = RespBuilder::new();
+                    if let Some(members) = result {
+                        resp.add_array(&members.len());
+                        for (member, score) in members.iter() {
+                            if options.contains(&SortedRangeOption::WITHSCORES) {
+                                resp.add_array(&2);
+                                resp.add_bulk_string(member);
+                                resp.add_bulk_string(&score.to_string());
+                            } else {
+                                resp.add_bulk_string(member);
+                            }
+                        }
+                    } else {
+                        resp.add_array(&0);
+                    }
+                    resp
+                }
+                Err(err) => {
+                    let mut resp = RespBuilder::new();
+                    resp.add_simple_error(err.to_string().as_str());
+                    resp
+                }
+            }
+        }
         Command::Keys(query) => match store.keys(&query) {
             Ok(keys) => {
                 let mut resp = RespBuilder::new();
