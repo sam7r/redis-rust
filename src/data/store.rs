@@ -32,6 +32,32 @@ impl DataStore {
 }
 
 impl DataStore {
+    pub fn geopos(
+        &self,
+        key: &str,
+        members: Vec<String>,
+    ) -> Result<Option<Vec<Option<(f64, f64)>>>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => {
+                let mut results = Vec::new();
+                for member in members {
+                    if let Some(score) = set.iter().find(|(_, m)| *m == &member).map(|(s, _)| s) {
+                        let coordinates = geo::decode(score.get_score() as u64);
+                        results.push(Some((coordinates.longitude, coordinates.latitude)));
+                    } else {
+                        results.push(None);
+                    }
+                }
+                Ok(Some(results))
+            }
+            Some(_) | None => Ok(None),
+        }
+    }
     pub fn geoadd(
         &self,
         key: &str,

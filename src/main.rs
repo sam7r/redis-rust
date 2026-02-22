@@ -557,6 +557,40 @@ fn process_normal_cmd(
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::GeoPos(key, members) => match store.geopos(&key, members.clone()) {
+            Ok(result) => {
+                let mut resp = RespBuilder::new();
+                if let Some(coordinates) = result {
+                    if !coordinates.is_empty() {
+                        resp.add_array(&coordinates.len());
+                        for pos in coordinates.iter() {
+                            if let Some((lon, lat)) = pos {
+                                resp.add_array(&2);
+                                resp.add_bulk_string(&lon.to_string());
+                                resp.add_bulk_string(&lat.to_string());
+                            } else {
+                                resp.negative_array();
+                            }
+                        }
+                    } else {
+                        resp.negative_array();
+                    }
+                } else {
+                    // missing key, return nil for all members
+                    resp.add_array(&members.len());
+                    for _ in 0..members.len() {
+                        resp.negative_array();
+                    }
+                }
+
+                resp
+            }
+            Err(err) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
+            }
+        },
         Command::GeoAdd(key, options, locations) => match store.geoadd(&key, options, locations) {
             Ok(result) => {
                 let mut resp = RespBuilder::new();

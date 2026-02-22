@@ -81,6 +81,7 @@ pub enum Command {
     Zscore(StringKey, StringKey),
     Zrem(StringKey, Vec<StringKey>),
     GeoAdd(StringKey, Vec<AddOption>, Vec<(f64, f64, StringKey)>),
+    GeoPos(StringKey, Vec<StringKey>),
     // transaction
     Multi,
     Exec,
@@ -137,6 +138,7 @@ impl Command {
             Command::Zscore(_, _) => "ZSCORE",
             Command::Zrem(_, _) => "ZREM",
             Command::GeoAdd(_, _, _) => "GEOADD",
+            Command::GeoPos(_, _) => "GEOPOS",
         }
     }
 
@@ -356,6 +358,11 @@ impl Command {
             Command::GeoAdd(_, _, _) => CommandAcl {
                 client_context: ClientContext::Master,
                 command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::GeoPos(_, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
         }
@@ -792,6 +799,18 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             }
                         }
                         Some(Command::GeoAdd(key, options, geo_entries))
+                    } else {
+                        None
+                    }
+                }
+                "GEOPOS" => {
+                    if command_parts.len() >= 2 {
+                        let key = StringKey::from(command_parts[1]);
+                        let members = command_parts[2..]
+                            .iter()
+                            .map(|&m| StringKey::from(m))
+                            .collect();
+                        Some(Command::GeoPos(key, members))
                     } else {
                         None
                     }

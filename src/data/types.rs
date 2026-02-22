@@ -17,11 +17,9 @@ impl Score {
     pub fn new(score: f64, member: String) -> Self {
         Score(score, member)
     }
-
     pub fn add_score(&mut self, delta: f64) {
         self.0 += delta;
     }
-
     pub fn get_score(&self) -> f64 {
         self.0
     }
