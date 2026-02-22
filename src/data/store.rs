@@ -192,6 +192,17 @@ impl DataStore {
             Some(_) | None => Ok(None),
         }
     }
+
+    pub fn zcard(&self, key: &str) -> Result<Option<usize>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => Ok(Some(set.len())),
+            Some(_) | None => Ok(None),
+        }
+    }
 }
 
 /**

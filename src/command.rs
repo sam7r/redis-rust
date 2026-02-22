@@ -77,6 +77,7 @@ pub enum Command {
     Zadd(StringKey, Vec<AddOption>, Vec<(f64, StringKey)>),
     Zrank(StringKey, StringKey, bool),
     Zrange(StringKey, i64, i64, Vec<SortedRangeOption>),
+    Zcard(StringKey),
     // transaction
     Multi,
     Exec,
@@ -129,6 +130,7 @@ impl Command {
             Command::Zadd(_, _, _) => "ZADD",
             Command::Zrank(_, _, _) => "ZRANK",
             Command::Zrange(_, _, _, _) => "ZRANGE",
+            Command::Zcard(_) => "ZCARD",
         }
     }
 
@@ -326,6 +328,11 @@ impl Command {
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
             Command::Zrange(_, _, _, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::Zcard(_) => CommandAcl {
                 client_context: ClientContext::Any,
                 command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
@@ -695,6 +702,13 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             }
                         }
                         Some(Command::Zrange(key, start, stop, options))
+                    } else {
+                        None
+                    }
+                }
+                "ZCARD" => {
+                    if command_parts.len() >= 2 {
+                        Some(Command::Zcard(StringKey::from(command_parts[1])))
                     } else {
                         None
                     }
