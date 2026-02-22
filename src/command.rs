@@ -80,6 +80,7 @@ pub enum Command {
     Zcard(StringKey),
     Zscore(StringKey, StringKey),
     Zrem(StringKey, Vec<StringKey>),
+    GeoAdd(StringKey, Vec<AddOption>, Vec<(f64, f64, StringKey)>),
     // transaction
     Multi,
     Exec,
@@ -135,6 +136,7 @@ impl Command {
             Command::Zcard(_) => "ZCARD",
             Command::Zscore(_, _) => "ZSCORE",
             Command::Zrem(_, _) => "ZREM",
+            Command::GeoAdd(_, _, _) => "GEOADD",
         }
     }
 
@@ -347,6 +349,11 @@ impl Command {
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
             Command::Zrem(_, _) => CommandAcl {
+                client_context: ClientContext::Master,
+                command_type: CommandType::Write,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::GeoAdd(_, _, _) => CommandAcl {
                 client_context: ClientContext::Master,
                 command_type: CommandType::Write,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
@@ -745,6 +752,46 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                             .map(|&m| StringKey::from(m))
                             .collect();
                         Some(Command::Zrem(key, members))
+                    } else {
+                        None
+                    }
+                }
+                "GEOADD" => {
+                    if command_parts.len() >= 4 {
+                        let key = StringKey::from(command_parts[1]);
+                        let mut options = Vec::new();
+                        let mut geo_entries = Vec::new();
+                        if command_parts.len() > 4 {
+                            options = command_parts[2..]
+                                .iter()
+                                .take_while(|&&opt| {
+                                    matches!(
+                                        opt.to_uppercase().as_str(),
+                                        "NX" | "XX" | "CH" | "INCR"
+                                    )
+                                })
+                                .map(|&opt| match opt.to_uppercase().as_str() {
+                                    "NX" => AddOption::NX,
+                                    "XX" => AddOption::XX,
+                                    "CH" => AddOption::CH,
+                                    _ => unreachable!(),
+                                })
+                                .collect();
+                        }
+                        for i in ((2 + options.len())..command_parts.len()).step_by(3) {
+                            if let (Some(lon_str), Some(lat_str), Some(member_str)) = (
+                                command_parts.get(i),
+                                command_parts.get(i + 1),
+                                command_parts.get(i + 2),
+                            ) && let (Ok(lon), Ok(lat)) =
+                                (lon_str.parse::<f64>(), lat_str.parse::<f64>())
+                            {
+                                geo_entries.push((lon, lat, member_str.to_string()));
+                            } else {
+                                return None; // Invalid longitude-latitude-member trio
+                            }
+                        }
+                        Some(Command::GeoAdd(key, options, geo_entries))
                     } else {
                         None
                     }

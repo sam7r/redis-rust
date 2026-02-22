@@ -7,6 +7,7 @@ use std::{
 
 use crate::data::{
     errors::{DataStoreError, Error},
+    geo,
     types::{
         AddOption, Event, Score, SetOption, SortedRangeOption, StreamEntry, StreamKey,
         StreamOption, StringKey, Subscribers, Value,
@@ -27,6 +28,25 @@ impl DataStore {
             expires: sync::RwLock::new(HashMap::new()),
             channels: sync::RwLock::new(HashMap::new()),
         }
+    }
+}
+
+impl DataStore {
+    pub fn geoadd(
+        &self,
+        key: &str,
+        options: Vec<AddOption>,
+        longitude_latitude_members: Vec<(f64, f64, String)>,
+    ) -> Result<Option<usize>, Error> {
+        let score_members = longitude_latitude_members
+            .into_iter()
+            .map(|(lon, lat, member)| {
+                let score = geo::encode(lat, lon) as f64;
+                (score, member)
+            })
+            .collect();
+
+        self.zadd(key, options, score_members)
     }
 }
 

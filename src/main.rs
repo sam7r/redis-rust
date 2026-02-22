@@ -557,6 +557,22 @@ fn process_normal_cmd(
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::GeoAdd(key, options, locations) => match store.geoadd(&key, options, locations) {
+            Ok(result) => {
+                let mut resp = RespBuilder::new();
+                if let Some(n) = result {
+                    resp.add_integer(&n.to_string());
+                } else {
+                    resp.add_simple_string("OK");
+                }
+                resp
+            }
+            Err(err) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
+            }
+        },
         Command::Zadd(key, options, member_scores) => {
             match store.zadd(&key, options, member_scores) {
                 Ok(result) => {
