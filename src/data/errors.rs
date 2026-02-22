@@ -31,6 +31,7 @@ pub enum DataStoreError {
     StreamEntryIdMustBeGreaterThan(String),
     StreamEntryIdLessThanLastEntry,
     UnexpectedEmptyStream,
+    InvalidGeoCoordinates(f64, f64),
 }
 
 impl fmt::Display for DataStoreError {
@@ -52,6 +53,9 @@ impl fmt::Display for DataStoreError {
             }
             DataStoreError::StreamEntryIdMustBeGreaterThan(v) => {
                 write!(f, "ERR The ID specified in XADD must be greater than {v}")
+            }
+            DataStoreError::InvalidGeoCoordinates(lon, lat) => {
+                write!(f, "ERR invalid longitude,latitude pair {lon},{lat}")
             }
         }
     }

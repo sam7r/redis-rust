@@ -6,6 +6,22 @@ const MAX_LONGITUDE: f64 = 180.0;
 const LATITUDE_RANGE: f64 = MAX_LATITUDE - MIN_LATITUDE;
 const LONGITUDE_RANGE: f64 = MAX_LONGITUDE - MIN_LONGITUDE;
 
+pub fn validate_coordinates(latitude: f64, longitude: f64) -> Result<(), String> {
+    if !(MIN_LATITUDE..=MAX_LATITUDE).contains(&latitude) {
+        return Err(format!(
+            "Latitude must be between {} and {}",
+            MIN_LATITUDE, MAX_LATITUDE
+        ));
+    }
+    if !(MIN_LONGITUDE..=MAX_LONGITUDE).contains(&longitude) {
+        return Err(format!(
+            "Longitude must be between {} and {}",
+            MIN_LONGITUDE, MAX_LONGITUDE
+        ));
+    }
+    Ok(())
+}
+
 fn spread_int32_to_int64(v: u32) -> u64 {
     let mut result = v as u64;
     result = (result | (result << 16)) & 0x0000FFFF0000FFFF;

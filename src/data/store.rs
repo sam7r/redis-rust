@@ -38,6 +38,11 @@ impl DataStore {
         options: Vec<AddOption>,
         longitude_latitude_members: Vec<(f64, f64, String)>,
     ) -> Result<Option<usize>, Error> {
+        for (lon, lat, _) in longitude_latitude_members.clone() {
+            geo::validate_coordinates(lat, lon)
+                .map_err(|_| Error::from(DataStoreError::InvalidGeoCoordinates(lon, lat)))?;
+        }
+
         let score_members = longitude_latitude_members
             .into_iter()
             .map(|(lon, lat, member)| {
