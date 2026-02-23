@@ -1,6 +1,6 @@
 use args::Value;
 use command::{Command, PreparedCommand, prepare_command};
-use data::store::DataStore;
+use data::{store::DataStore, types::SortedRangeOption};
 use governor::{
     instance::GovernorInstance,
     master::MasterGovernor,
@@ -20,8 +20,6 @@ use message::{
     broker::Broker,
     types::{Message, SubscriberId, TopicFilter},
 };
-
-use crate::data::types::SortedRangeOption;
 
 mod args;
 mod command;
