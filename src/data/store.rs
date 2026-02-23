@@ -9,8 +9,9 @@ use crate::data::{
     errors::{DataStoreError, Error},
     geo,
     types::{
-        AddOption, Event, GeoPositions, GeoUnit, Score, SetOption, SortedRangeOption, StreamEntry,
-        StreamKey, StreamOption, StringKey, Subscribers, Value,
+        AddOption, Event, GeoPositions, GeoSearchOption, GeoSearchResult, GeoUnit, Score,
+        SetOption, SortedRangeOption, StreamEntry, StreamKey, StreamOption, StringKey, Subscribers,
+        Value,
     },
     utils::{create_subscriber_id, parse_entry_id_add, parse_entry_id_query, value_type_as_str},
 };
@@ -31,7 +32,113 @@ impl DataStore {
     }
 }
 
+/**
+ * Geo commands:
+ * GEOADD key [NX|XX|LT|GT] longitude latitude member [longitude latitude member ...]
+ * GEODIST key member1 member2 [unit]
+ * GEOPOS key member [member ...]
+ * GEOSEARCH key <FROMMEMBER member | FROMLONLAT lon lat> <BYRADIUS radius unit | BYBOX width height unit>
+ *   [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] [ASC|DESC]
+ */
 impl DataStore {
+    pub fn geosearch(
+        &self,
+        key: &str,
+        options: Vec<GeoSearchOption>,
+    ) -> Result<Option<GeoSearchResult>, Error> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| Error::from(DataStoreError::LockError))?;
+
+        match data.get(key) {
+            Some(Value::SortedSet(set)) => {
+                let has = |opt: &GeoSearchOption| options.contains(opt);
+
+                let center = {
+                    let from_member = options.iter().find_map(|opt| {
+                        if let GeoSearchOption::FROMMEMBER(m) = opt {
+                            set.iter().find(|(_, m2)| **m2 == *m).map(|(s, _)| s)
+                        } else {
+                            None
+                        }
+                    });
+
+                    let from_lonlat = options.iter().find_map(|opt| {
+                        if let GeoSearchOption::FROMLONLAT(lon, lat) = opt {
+                            Some(geo::Coordinates {
+                                latitude: *lat,
+                                longitude: *lon,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+
+                    from_member
+                        .map(|s| geo::decode(s.get_score() as u64))
+                        .or(from_lonlat)
+                };
+
+                let Some(center) = center else {
+                    return Ok(None);
+                };
+
+                let max_distance = geo::max_distance_bybox_or_radius(options.clone());
+
+                let output_unit = options.iter().find_map(|opt| {
+                    if let GeoSearchOption::BYRADIUS(_, u) = opt {
+                        Some(u.clone())
+                    } else if let GeoSearchOption::BYBOX(_, _, u) = opt {
+                        Some(u.clone())
+                    } else {
+                        None
+                    }
+                });
+
+                let results: GeoSearchResult = set
+                    .iter()
+                    .filter_map(|(s, m)| {
+                        let candidate_hash = s.get_score() as u64;
+                        let coord = geo::decode(candidate_hash);
+                        let distance = geo::haversine_distance(&center, &coord, GeoUnit::M);
+
+                        if let Some(max_dist) = max_distance
+                            && distance > max_dist
+                        {
+                            return None;
+                        }
+
+                        Some((
+                            m.clone(),
+                            if has(&GeoSearchOption::WITHCOORD) {
+                                Some(coord)
+                            } else {
+                                None
+                            },
+                            if has(&GeoSearchOption::WITHHASH) {
+                                Some(candidate_hash as f64)
+                            } else {
+                                None
+                            },
+                            if has(&GeoSearchOption::WITHDIST) {
+                                Some(geo::convert_meters_to_unit(
+                                    distance,
+                                    output_unit.clone().unwrap_or(GeoUnit::M),
+                                ) as u64)
+                            } else {
+                                None
+                            },
+                        ))
+                    })
+                    .collect();
+
+                Ok(Some(results))
+            }
+            Some(_) | None => Ok(None),
+        }
+    }
+
     pub fn geodist(
         &self,
         key: &str,
@@ -43,6 +150,7 @@ impl DataStore {
             .data
             .read()
             .map_err(|_| Error::from(DataStoreError::LockError))?;
+
         match data.get(key) {
             Some(Value::SortedSet(set)) => {
                 let score1_opt = set.iter().find(|(_, m)| *m == member1).map(|(s, _)| s);
@@ -59,6 +167,7 @@ impl DataStore {
             Some(_) | None => Ok(None),
         }
     }
+
     pub fn geopos(&self, key: &str, members: Vec<String>) -> Result<Option<GeoPositions>, Error> {
         let data = self
             .data
@@ -81,6 +190,7 @@ impl DataStore {
             Some(_) | None => Ok(None),
         }
     }
+
     pub fn geoadd(
         &self,
         key: &str,
@@ -305,6 +415,7 @@ impl DataStore {
             .data
             .write()
             .map_err(|_| Error::from(DataStoreError::LockError))?;
+
         match data.get_mut(key) {
             Some(Value::SortedSet(set)) => {
                 let mut remove_count = 0;

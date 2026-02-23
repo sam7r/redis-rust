@@ -6,5 +6,4 @@ edition = "2024"
 
 [dependencies]
 rand = "0.10.0"
-nom = "8.0.0"
 glob-match = "0.2.1"

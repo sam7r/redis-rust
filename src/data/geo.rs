@@ -1,4 +1,4 @@
-use crate::data::types::GeoUnit;
+use crate::data::types::{GeoSearchOption, GeoUnit};
 
 const MIN_LATITUDE: f64 = -85.05112878;
 const MAX_LATITUDE: f64 = 85.05112878;
@@ -52,7 +52,7 @@ pub fn encode(latitude: f64, longitude: f64) -> u64 {
     interleave(lat_int, lon_int)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Coordinates {
     pub latitude: f64,
     pub longitude: f64,
@@ -117,5 +117,51 @@ pub fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates, unit: GeoU
         GeoUnit::KM => 6372.79756085 * 2.0 * v.sqrt().asin(),
         GeoUnit::MI => 3959.87281827 * 2.0 * v.sqrt().asin(),
         GeoUnit::FT => 20908128.480498 * 2.0 * v.sqrt().asin(),
+    }
+}
+
+pub fn convert_unit_to_meters(value: f64, unit: GeoUnit) -> f64 {
+    match unit {
+        GeoUnit::M => value,
+        GeoUnit::KM => value * 1000.0,
+        GeoUnit::MI => value * 1609.344,
+        GeoUnit::FT => value * 0.3048,
+    }
+}
+
+pub fn convert_meters_to_unit(value: f64, unit: GeoUnit) -> f64 {
+    match unit {
+        GeoUnit::M => value,
+        GeoUnit::KM => value / 1000.0,
+        GeoUnit::MI => value / 1609.344,
+        GeoUnit::FT => value / 0.3048,
+    }
+}
+
+pub fn max_distance_bybox_or_radius(options: Vec<GeoSearchOption>) -> Option<f64> {
+    let by_radius = options.iter().find_map(|opt| {
+        if let GeoSearchOption::BYRADIUS(r, u) = opt {
+            Some((*r, u.clone()))
+        } else {
+            None
+        }
+    });
+
+    let by_box = options.iter().find_map(|opt| {
+        if let GeoSearchOption::BYBOX(w, h, u) = opt {
+            Some((*w, *h, u.clone()))
+        } else {
+            None
+        }
+    });
+
+    if let Some((radius, unit)) = by_radius {
+        Some(convert_unit_to_meters(radius, unit))
+    } else if let Some((width, height, unit)) = by_box {
+        let width_meters = convert_unit_to_meters(width, unit.clone());
+        let height_meters = convert_unit_to_meters(height, unit.clone());
+        Some((width_meters / 2.0).hypot(height_meters / 2.0))
+    } else {
+        None
     }
 }

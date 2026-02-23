@@ -557,6 +557,57 @@ fn process_normal_cmd(
 
 fn perform_command(store: Arc<DataStore>, command: Command, mode: &mut Mode) -> RespBuilder {
     match command {
+        Command::GeoSearch(key, options) => match store.geosearch(&key, options.clone()) {
+            Ok(result) => {
+                let mut resp = RespBuilder::new();
+                let Some(places) = result else {
+                    resp.negative_array();
+                    return resp;
+                };
+
+                resp.add_array(&places.len());
+
+                let out_opt_count = options
+                    .iter()
+                    .filter(|&o| {
+                        matches!(
+                            o,
+                            &data::types::GeoSearchOption::WITHDIST
+                                | &data::types::GeoSearchOption::WITHCOORD
+                                | &data::types::GeoSearchOption::WITHHASH
+                        )
+                    })
+                    .count();
+
+                for (place, coordinates, distance, hash) in places {
+                    if out_opt_count == 0 {
+                        resp.add_bulk_string(&place);
+                    } else {
+                        resp.add_array(&(1 + out_opt_count));
+                        resp.add_bulk_string(&place);
+
+                        if let Some(place_dist) = distance {
+                            resp.add_bulk_string(&place_dist.to_string());
+                        }
+                        if let Some(place_coord) = coordinates {
+                            resp.add_array(&2);
+                            resp.add_bulk_string(&place_coord.longitude.to_string());
+                            resp.add_bulk_string(&place_coord.latitude.to_string());
+                        }
+                        if let Some(place_hash) = hash {
+                            resp.add_bulk_string(&place_hash.to_string());
+                        }
+                    }
+                }
+
+                resp
+            }
+            Err(err) => {
+                let mut resp = RespBuilder::new();
+                resp.add_simple_error(err.to_string().as_str());
+                resp
+            }
+        },
         Command::GeoDist(key, member1, member2, unit) => {
             match store.geodist(&key, &member1, &member2, unit) {
                 Ok(result) => {

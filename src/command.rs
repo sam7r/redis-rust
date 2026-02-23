@@ -1,4 +1,4 @@
-use crate::data::types::{GeoUnit, SortedRangeOption};
+use crate::data::types::{GeoSearchOption, GeoUnit, SortOrder, SortedRangeOption};
 
 use super::data::types::{AddOption, SetOption, StreamKey, StreamOption, StringKey};
 use super::governor::types::Info;
@@ -83,6 +83,7 @@ pub enum Command {
     GeoAdd(StringKey, Vec<AddOption>, Vec<(f64, f64, StringKey)>),
     GeoPos(StringKey, Vec<StringKey>),
     GeoDist(StringKey, String, String, GeoUnit),
+    GeoSearch(StringKey, Vec<GeoSearchOption>),
     // transaction
     Multi,
     Exec,
@@ -141,6 +142,7 @@ impl Command {
             Command::GeoAdd(_, _, _) => "GEOADD",
             Command::GeoPos(_, _) => "GEOPOS",
             Command::GeoDist(_, _, _, _) => "GEODIST",
+            Command::GeoSearch(_, _) => "GEOSEARCH",
         }
     }
 
@@ -368,6 +370,11 @@ impl Command {
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
             },
             Command::GeoDist(_, _, _, _) => CommandAcl {
+                client_context: ClientContext::Any,
+                command_type: CommandType::Read,
+                modes: vec![CommandMode::Normal, CommandMode::Multi],
+            },
+            Command::GeoSearch(_, _) => CommandAcl {
                 client_context: ClientContext::Any,
                 command_type: CommandType::Read,
                 modes: vec![CommandMode::Normal, CommandMode::Multi],
@@ -843,6 +850,100 @@ pub fn prepare_command_with_parser(parser: &mut RespParser) -> Option<Command> {
                         None
                     }
                 }
+                "GEOSEARCH" => {
+                    if command_parts.len() >= 3 {
+                        let key = StringKey::from(command_parts[1]);
+                        let mut options: Vec<GeoSearchOption> = Vec::new();
+                        let mut option_iter = command_parts[2..].iter();
+
+                        while let Some(so) = option_iter.next() {
+                            let search_option = so.to_uppercase();
+                            match search_option.as_str() {
+                                "FROMMEMBER" => {
+                                    if let Some(member) = option_iter.next() {
+                                        options
+                                            .push(GeoSearchOption::FROMMEMBER(member.to_string()));
+                                    } else {
+                                        return None;
+                                    }
+                                }
+                                "FROMLONLAT" => {
+                                    if let (Some(lo), Some(la)) =
+                                        (option_iter.next(), option_iter.next())
+                                    {
+                                        let (Ok(lon), Ok(lat)) =
+                                            (lo.parse::<f64>(), la.parse::<f64>())
+                                        else {
+                                            return None;
+                                        };
+                                        options.push(GeoSearchOption::FROMLONLAT(lon, lat));
+                                    }
+                                }
+                                "BYRADIUS" => {
+                                    if let (Some(ra), Some(un)) =
+                                        (option_iter.next(), option_iter.next())
+                                    {
+                                        let Ok(radius) = ra.parse::<f64>() else {
+                                            return None;
+                                        };
+                                        let unit = match un.to_uppercase().as_str() {
+                                            "M" => GeoUnit::M,
+                                            "KM" => GeoUnit::KM,
+                                            "MI" => GeoUnit::MI,
+                                            "FT" => GeoUnit::FT,
+                                            _ => GeoUnit::M,
+                                        };
+                                        options.push(GeoSearchOption::BYRADIUS(radius, unit));
+                                    }
+                                }
+                                "BYBOX" => {
+                                    if let (Some(wi), Some(hi), Some(un)) =
+                                        (option_iter.next(), option_iter.next(), option_iter.next())
+                                    {
+                                        let (Ok(width), Ok(height)) =
+                                            (wi.parse::<f64>(), hi.parse::<f64>())
+                                        else {
+                                            return None;
+                                        };
+                                        let unit = match un.to_uppercase().as_str() {
+                                            "M" => GeoUnit::M,
+                                            "KM" => GeoUnit::KM,
+                                            "MI" => GeoUnit::MI,
+                                            "FT" => GeoUnit::FT,
+                                            _ => GeoUnit::M,
+                                        };
+                                        options.push(GeoSearchOption::BYBOX(height, width, unit));
+                                    }
+                                }
+                                "WITHDIST" => {
+                                    options.push(GeoSearchOption::WITHDIST);
+                                }
+                                "WITHCOORD" => {
+                                    options.push(GeoSearchOption::WITHCOORD);
+                                }
+                                "WITHHASH" => {
+                                    options.push(GeoSearchOption::WITHHASH);
+                                }
+                                "ASC" | "DESC" => {
+                                    match search_option.as_str() {
+                                        "ASC" => {
+                                            options.push(GeoSearchOption::Sort(SortOrder::Asc))
+                                        }
+                                        "DESC" => {
+                                            options.push(GeoSearchOption::Sort(SortOrder::Desc))
+                                        }
+                                        _ => {}
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        Some(Command::GeoSearch(key, options))
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }
@@ -1062,6 +1163,20 @@ mod tests {
                 assert_eq!(score_member_pairs[1].1, "two");
             }
             _ => panic!("Expected ZADD command"),
+        }
+    }
+
+    #[test]
+    fn prepare_geo_search_command() {
+        let data = "*7\r\n$9\r\nGEOSEARCH\r\n$5\r\nmygeo\r\n$10\r\nFROMMEMBER\r\n$3\r\none\r\n$8\r\nBYRADIUS\r\n$2\r\n10\r\n$2\r\nKM\r\n";
+        let prepared = prepare_command(data).unwrap();
+        match prepared.cmd {
+            Command::GeoSearch(key, options) => {
+                assert_eq!(key, "mygeo");
+                assert!(options.contains(&GeoSearchOption::FROMMEMBER("one".to_string())));
+                assert!(options.contains(&GeoSearchOption::BYRADIUS(10.0, GeoUnit::KM)));
+            }
+            _ => panic!("Expected GEOSEARCH command"),
         }
     }
 }

@@ -4,12 +4,15 @@ use std::{
     sync::mpsc,
 };
 
+use crate::data::geo::Coordinates;
+
 pub type StringKey = String;
 pub type StreamKey = String;
 pub type StreamEntryId = (u128, usize);
 pub type StreamEntry = BTreeMap<StreamEntryId, Vec<(String, String)>>;
 pub type SortedSet = BTreeMap<Score, String>;
 pub type GeoPositions = Vec<Option<(f64, f64)>>;
+pub type GeoSearchResult = Vec<(String, Option<Coordinates>, Option<f64>, Option<u64>)>;
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct Score(f64, String);
@@ -138,7 +141,7 @@ pub enum SetOption {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SortedRangeOption {
     BYSCORE,
     BYLEX,
@@ -147,10 +150,29 @@ pub enum SortedRangeOption {
     WITHSCORES,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GeoUnit {
     M,
     KM,
     MI,
     FT,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum GeoSearchOption {
+    FROMMEMBER(String),
+    FROMLONLAT(f64, f64),
+    BYRADIUS(f64, GeoUnit),
+    BYBOX(f64, f64, GeoUnit),
+    WITHDIST,
+    WITHCOORD,
+    WITHHASH,
+    Sort(SortOrder),
 }
