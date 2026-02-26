@@ -30,7 +30,7 @@ impl Config {
         args.add(
             Opt::new("DB_DIR")
                 .long("dir")
-                .default("./temp")
+                .default("/tmp")
                 .required(false),
         );
 
